@@ -1,6 +1,6 @@
 import math
 from datetime import datetime, timezone
-from src.api.client import client
+from src.client import client
 
 SNOONU_HQ = (25.3548, 51.4326)  # West Bay / Lusail, Doha — illustrative only
 

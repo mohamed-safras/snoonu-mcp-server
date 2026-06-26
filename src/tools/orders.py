@@ -1,7 +1,7 @@
 import random
 import string
 from datetime import datetime, timedelta, timezone
-from src.api.client import client
+from src.client import client
 from src.api.exceptions import ProductNotFoundError
 from src.order_rate_limit import check_rate_limit
 from src.activity_log import log_order_event

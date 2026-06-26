@@ -1,4 +1,4 @@
-from src.api.client import client
+from src.client import client
 from src.cache import cached
 
 def register(mcp):
