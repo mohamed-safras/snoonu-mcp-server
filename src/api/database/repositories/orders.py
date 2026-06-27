@@ -7,6 +7,7 @@ class OrdersRepository:
             session.add(Order(id=ref, total_amount=total, currency=currency, recipient=recipient,
                                delivery=delivery, sender=sender, gift_message=gift_message,
                                expires_at=expires_at))
+            session.flush()  # order_items has no ORM relationship() to infer insert order from
             for item in cart:
                 session.add(OrderItem(order_id=ref, product_id=item["product_id"],
                                        quantity=item["quantity"], icing_text=item.get("icing_text")))
