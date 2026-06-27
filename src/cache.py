@@ -1,18 +1,23 @@
-import time
+import json
 from functools import wraps
+from src.redis_client import redis_client
+from src.metrics import CACHE_HITS, CACHE_MISSES
 
 def cached(ttl_seconds: int):
-    """Simple per-argument TTL cache for read-mostly tool handlers."""
+    """Redis-backed TTL cache for read-mostly tool handlers, shared across workers/replicas."""
     def decorator(fn):
-        store: dict = {}
+        prefix = f"cache:{fn.__module__}.{fn.__qualname__}"
+
         @wraps(fn)
         def wrapper(*args, **kwargs):
-            key = (args, tuple(sorted(kwargs.items())))
-            entry = store.get(key)
-            if entry and time.time() - entry[1] < ttl_seconds:
-                return entry[0]
+            key = f"{prefix}:{args}:{sorted(kwargs.items())}"
+            cached_value = redis_client.get(key)
+            if cached_value is not None:
+                CACHE_HITS.labels(fn.__qualname__).inc()
+                return json.loads(cached_value)
+            CACHE_MISSES.labels(fn.__qualname__).inc()
             result = fn(*args, **kwargs)
-            store[key] = (result, time.time())
+            redis_client.set(key, json.dumps(result), ex=ttl_seconds)
             return result
         return wrapper
     return decorator
