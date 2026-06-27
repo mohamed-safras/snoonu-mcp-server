@@ -6,7 +6,8 @@ on:
   workflow_dispatch: {}
 
 env:
-  PROJECT_ID: ${{ vars.PROJECT_ID}}
+  PROJECT_ID: ${{ vars.PROJECT_ID }}
+  PROJECT_NUMBER: ${{ vars.PROJECT_NUMBER }}
   REGION: ${{ vars.REGION }}
   SERVICE_NAME: "snoonu-mcp-server"
   REPO_NAME: "snoonu-mcp-images"

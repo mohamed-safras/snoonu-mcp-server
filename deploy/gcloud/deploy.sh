@@ -7,6 +7,7 @@ set -euo pipefail
 
 # ---- config ----------------------------------------------------------------
 PROJECT_ID="${PROJECT_ID:-snoonu-500713}"
+PROJECT_NUMBER="${PROJECT_NUMBER:-1006350847085}"
 REGION="${REGION:-me-central1}"
 SERVICE_NAME="${SERVICE_NAME:-snoonu-mcp-server}"
 REPO_NAME="${REPO_NAME:-snoonu-mcp-images}"          # separate from hala-images
@@ -39,7 +40,7 @@ build_and_push() {
 # ---- 3. deploy to Cloud Run (free at low traffic: Cloud Run's always-free tier
 #         covers ~2M requests/mo; this stays within it for dev/demo use) -------
 deploy() {
-  export PROJECT_ID REGION SERVICE_NAME IMAGE PG_IMAGE
+  export PROJECT_ID PROJECT_NUMBER REGION SERVICE_NAME IMAGE PG_IMAGE
   envsubst < deploy/gcloud/service.yaml.tpl > /tmp/snoonu-mcp-service.yaml
 
   gcloud run services replace /tmp/snoonu-mcp-service.yaml --region="$REGION"

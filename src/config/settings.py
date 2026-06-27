@@ -13,6 +13,7 @@ class Settings:
     redis_url: str
     log_level: str
     log_json: bool
+    allowed_hosts: list[str]
 
 def load() -> Settings:
     return Settings(
@@ -26,6 +27,13 @@ def load() -> Settings:
         redis_url=get_secret("SNOONU_REDIS_URL", "redis://localhost:6379/0"),
         log_level=os.environ.get("SNOONU_LOG_LEVEL", "INFO"),
         log_json=os.environ.get("SNOONU_LOG_JSON", "true").lower() == "true",
+        # MCP's built-in DNS-rebinding protection only allows localhost by default;
+        # deployed hosts (e.g. the Cloud Run hostname) must be added explicitly.
+        allowed_hosts=[
+            h.strip() for h in os.environ.get(
+                "SNOONU_ALLOWED_HOSTS", "127.0.0.1:*,localhost:*,[::1]:*"
+            ).split(",") if h.strip()
+        ],
     )
 
 settings = load()

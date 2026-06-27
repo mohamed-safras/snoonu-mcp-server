@@ -1,4 +1,5 @@
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
 from starlette.requests import Request
@@ -19,7 +20,11 @@ configure_logging()
 # Without this, MCP session IDs are pinned to the worker process that created them,
 # so running >1 Gunicorn worker silently breaks clients ("Session terminated") the
 # moment a follow-up request lands on a different worker.
-mcp = FastMCP("snoonu-mcp-server", stateless_http=True)
+mcp = FastMCP(
+    "snoonu-mcp-server",
+    stateless_http=True,
+    transport_security=TransportSecuritySettings(allowed_hosts=settings.allowed_hosts),
+)
 
 products.register(mcp)
 categories.register(mcp)
