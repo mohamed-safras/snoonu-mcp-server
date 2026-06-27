@@ -1,0 +1,58 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  PROJECT_ID: ${{ vars.PROJECT_ID}}
+  REGION: ${{ vars.REGION }}
+  SERVICE_NAME: "snoonu-mcp-server"
+  REPO_NAME: "snoonu-mcp-images"
+
+permissions:
+  contents: read
+  id-token: write # required for Workload Identity Federation
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ steps.url.outputs.service_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/1006350847085/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: snoonu-mcp-deployer@snoonu-500713.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - run: gcloud auth configure-docker ${REGION}-docker.pkg.dev
+
+      - name: Build and push images
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${SERVICE_NAME}:${{ github.sha }}"
+          PG_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${SERVICE_NAME}-pg-seed:${{ github.sha }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          docker build -t "$PG_IMAGE" deploy/gcloud/db
+          docker push "$PG_IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          echo "PG_IMAGE=$PG_IMAGE" >> "$GITHUB_ENV"
+
+      - name: Render service.yaml
+        run: envsubst < deploy/gcloud/service.yaml.tpl > /tmp/service.yaml
+
+      - run: gcloud run services replace /tmp/service.yaml --region="${REGION}"
+
+      - id: url
+        name: Show service URL
+        run: |
+          URL=$(gcloud run services describe "${SERVICE_NAME}" --region="${REGION}" --format='value(status.url)')
+          echo "Deployed: $URL"
+          echo "service_url=$URL" >> "$GITHUB_OUTPUT"
