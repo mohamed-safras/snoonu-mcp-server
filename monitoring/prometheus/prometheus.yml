@@ -1,0 +1,7 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: snoonu-mcp
+    static_configs:
+      - targets: ["mcp-server:8000"]
