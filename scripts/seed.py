@@ -139,7 +139,7 @@ def seed():
                     "in_stock": in_stock,
                     "stock_level": _stock_level(in_stock),
                     "rating": round(random.uniform(3.5, 5.0), 1),
-                    "image_url": f"https://loremflickr.com/600/600/{keywords}?lock={pid}",
+                    "image_url": f"https://picsum.photos/seed/snu{pid}/600/600",
                     "url": f"https://www.snoonu.com/qa-en/qatar/product/{pid_str}",
                 })
                 pid += 1
