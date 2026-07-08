@@ -1,129 +1,43 @@
 """
-Generates deploy/gcloud/db/02-seed-data.sql with real Qatar/GCC products
-pulled from the OpenFoodFacts public API (openfoodfacts.org).
-
-Products are mapped to our 10 categories based on their OFN category tags,
-then merged with curated Qatar-specific products (Baladna, Mazzraty, Rayyan,
-Doha Dates, etc.) that may have limited OFN coverage.
+Generates deploy/gcloud/db/02-seed-data.sql with 500+ real Qatar/GCC products.
+Self-contained: no external API calls.
 
 Usage:
     python scripts/generate_seed.py
-    python scripts/generate_seed.py --count 1200
+    python scripts/generate_seed.py --count 500
 """
-
-import json, time, urllib.request, urllib.parse, re, sys, os, hashlib
+import os, sys
 
 CREATED_AT = "2026-06-26 15:55:09.901789+00"
-TARGET = int(sys.argv[sys.argv.index("--count")+1]) if "--count" in sys.argv else 1200
+RESTRICT_KEY = "cznfCrh011aXx2WgnIIH7HXTdkggUATtzGQRUYrgN4XKaYgXVbIM2o4ZTTOZM9o"
 
-# ── Category map: OFN tag → our category id ──────────────────────────────────
-OFN_CAT_MAP = {
-    "en:milks":2,"en:dairy":2,"en:yogurts":2,"en:fermented-milks":2,
-    "en:cheeses":2,"en:butters":2,"en:beverages":2,"en:waters":2,
-    "en:sodas":2,"en:fruit-juices":2,"en:coffees":2,"en:teas":2,
-    "en:instant-coffees":2,"en:cereals-and-their-products":2,"en:breads":2,
-    "en:biscuits-and-cakes":2,"en:chocolates":2,"en:confectioneries":2,
-    "en:snacks":2,"en:chips-and-crackers":2,"en:dates":2,"en:dried-fruits":2,
-    "en:rices":2,"en:pastas":2,"en:cooking-oils":2,"en:sauces":2,
-    "en:condiments":2,"en:eggs":2,"en:meats":2,"en:frozen-foods":2,
-    "en:nut-butters":2,"en:spreadable-fats":2,"en:jams":2,"en:honeys":2,
-    "en:dietary-supplements":3,"en:vitamins":3,"en:cosmetics":3,
-    "en:beauty":3,"en:personal-care":3,"en:hair-care":3,"en:skin-care":3,
-    "en:oral-hygiene":3,"en:deodorants":3,
-    "en:electronics":4,"en:headphones":4,"en:speakers":4,
-    "en:baby-foods":7,"en:infant-formulas":7,"en:baby-milks":7,"en:diapers":7,
-    "en:sports-nutrition":8,"en:energy-drinks":8,"en:sports-drinks":8,
-    "en:protein-supplements":8,
-    "en:pet-foods":9,"en:cat-foods":9,"en:dog-foods":9,
+IMG = {
+    "nescafe":    "https://images.openfoodfacts.org/images/products/611/101/890/3161/front_fr.48.400.jpg",
+    "coca_cola":  "https://images.openfoodfacts.org/images/products/544/900/021/4911/front_fr.335.400.jpg",
+    "coke_zero":  "https://images.openfoodfacts.org/images/products/544/900/021/4799/front_en.363.400.jpg",
+    "evian":      "https://images.openfoodfacts.org/images/products/305/764/025/7773/front_en.343.400.jpg",
+    "pellegrino": "https://images.openfoodfacts.org/images/products/800/227/001/4901/front_en.304.400.jpg",
+    "rani":       "https://images.openfoodfacts.org/images/products/628/176/420/6028/front_en.5.400.jpg",
+    "almarai":    "https://images.openfoodfacts.org/images/products/628/176/400/0038/front_en.12.400.jpg",
+    "pringles":   "https://images.openfoodfacts.org/images/products/038/000/845/5963/front_en.15.400.jpg",
+    "kitkat":     "https://images.openfoodfacts.org/images/products/400/009/007/5050/front_en.131.400.jpg",
+    "cadbury":    "https://images.openfoodfacts.org/images/products/762/221/044/9283/front_en.605.400.jpg",
+    "nutella":    "https://images.openfoodfacts.org/images/products/000/008/017/6800/front_en.273.400.jpg",
+    "heinz":      "https://images.openfoodfacts.org/images/products/000/001/700/7033/front_en.280.400.jpg",
+    "lurpak":     "https://images.openfoodfacts.org/images/products/570/160/003/1154/front_en.34.400.jpg",
+    "philly":     "https://images.openfoodfacts.org/images/products/768/901/237/0005/front_en.44.400.jpg",
+    "tilda":      "https://images.openfoodfacts.org/images/products/500/030/126/8620/front_en.38.400.jpg",
+    "lipton":     "https://images.openfoodfacts.org/images/products/800/235/005/4231/front_en.21.400.jpg",
+    "aquafina":   "https://images.openfoodfacts.org/images/products/611/125/242/1575/front_fr.19.400.jpg",
+    "cappy":      "https://images.openfoodfacts.org/images/products/544/900/014/7417/front_en.73.400.jpg",
+    "lindt70":    "https://images.openfoodfacts.org/images/products/304/692/002/2651/front_en.159.400.jpg",
+    "lindt85":    "https://images.openfoodfacts.org/images/products/304/692/002/2606/front_en.102.400.jpg",
+    "tuc":        "https://images.openfoodfacts.org/images/products/541/004/100/1204/front_en.520.400.jpg",
+    "wasa":       "https://images.openfoodfacts.org/images/products/730/040/048/1595/front_fr.265.400.jpg",
+    "nesquik":    "https://images.openfoodfacts.org/images/products/844/529/013/3403/front_en.157.400.jpg",
 }
 
-KEYWORD_CAT = [
-    ("milk",2),("laban",2),("yogh",2),("yogurt",2),("cheese",2),("butter",2),
-    ("juice",2),("water",2),("cola",2),("pepsi",2),("7up",2),("fanta",2),
-    ("sprite",2),("coffee",2),("nescaf",2),("tea",2),("lipton",2),("bread",2),
-    ("toast",2),("rice",2),("date",2),("chips",2),("pringles",2),("doritos",2),
-    ("lay's",2),("kitkat",2),("cadbury",2),("snickers",2),("twix",2),
-    ("nutella",2),("ketchup",2),("pasta",2),("biscuit",2),("cookie",2),
-    ("cracker",2),("chocolate",2),("candy",2),("sugar",2),("flour",2),
-    ("egg",2),("chicken",2),("beef",2),("tuna",2),("salmon",2),
-    ("baladna",2),("mazzraty",2),("almarai",2),("rayyan",2),("oasis",2),
-    ("aquafina",2),("evian",2),("rani",2),("cream",2),("mayonnaise",2),
-    ("vitamin",3),("supplement",3),("panadol",3),("vicks",3),("shampoo",3),
-    ("soap",3),("lotion",3),("moisturis",3),("sunscreen",3),("toothpaste",3),
-    ("mouthwash",3),("deodorant",3),("perfume",3),("cologne",3),
-    ("face wash",3),("micellar",3),("serum",3),("conditioner",3),
-    ("airpods",4),("earbuds",4),("headphone",4),("speaker",4),
-    ("charger",4),("cable",4),("power bank",4),
-    ("shirt",5),("shoe",5),("sneaker",5),("watch",5),("sunglasses",5),
-    ("wallet",5),("belt",5),
-    ("detergent",6),("cleaner",6),("bleach",6),("trash",6),("tissue",6),
-    ("wipe",6),("sponge",6),("pan",6),("air purifier",6),
-    ("toothbrush",6),("electric toothbrush",6),
-    ("lego",7),("toy",7),("doll",7),("diaper",7),("nappy",7),
-    ("formula",7),("baby",7),("hot wheels",7),("barbie",7),
-    ("protein",8),("whey",8),("gatorade",8),("energy drink",8),
-    ("royal canin",9),("pedigree",9),("whiskas",9),("kong",9),
-    ("cat food",9),("dog food",9),("cat litter",9),("pet",9),
-    ("battery",10),("sanitizer",10),("tape",10),("pen",10),
-    ("post-it",10),("scotch",10),("notebook",10),
-]
-
-def guess_category(name, brands, tags):
-    for t in tags:
-        if t in OFN_CAT_MAP:
-            return OFN_CAT_MAP[t]
-    txt = (name+" "+brands).lower()
-    for kw, c in KEYWORD_CAT:
-        if kw in txt:
-            return c
-    return 2
-
-def guess_price(cat_id, name):
-    ranges={1:(45,250),2:(1.5,90),3:(8,120),4:(50,3500),
-            5:(100,1200),6:(8,550),7:(15,250),8:(6,900),9:(15,200),10:(5,150)}
-    lo,hi=ranges.get(cat_id,(5,100))
-    seed=int(hashlib.md5(name.encode()).hexdigest(),16)%1000
-    return round(lo+(hi-lo)*seed/1000,2)
-
-def esc(s):
-    if not s: return "NULL"
-    return "'"+str(s).replace("'","''")+"'"
-
-def fetch_page(params, page, page_size=200):
-    p={**params,"page":page,"page_size":page_size,"json":"1",
-       "fields":"id,code,product_name,brands,categories_tags,image_front_url,quantity"}
-    url="https://world.openfoodfacts.org/cgi/search.pl?"+urllib.parse.urlencode(p)
-    try:
-        req=urllib.request.Request(url,headers={
-            "User-Agent":"SnoounuMCPServer/1.0 seed-gen (github.com/Mohamed-safras/snoonu-mcp-server)"})
-        with urllib.request.urlopen(req,timeout=40) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except Exception as e:
-        print(f"  [warn] page {page}: {e}",file=sys.stderr)
-        return None
-
-def collect(params, max_p=500):
-    out=[]
-    for page in range(1,20):
-        if len(out)>=max_p: break
-        print(f"  page {page}...",file=sys.stderr)
-        data=fetch_page(params,page)
-        if not data or not data.get("products"): break
-        for p in data["products"]:
-            name=(p.get("product_name") or "").strip()
-            brands=(p.get("brands") or "").strip()
-            img=(p.get("image_front_url") or "").strip()
-            if not name or not img or not img.startswith("http"): continue
-            if len(name)>120: continue
-            out.append({"name":name,"brands":brands[:80],"img":img,
-                        "tags":p.get("categories_tags") or []})
-        total=data.get("count",0)
-        if page*200>=total: break
-        time.sleep(0.4)
-    return out
-
-# ── Curated products (always included) ───────────────────────────────────────
-# (id, name, brand, desc, cat_id, price, img, rating, in_stock, compare_at)
+# ── Curated products (id, name, brand, desc, cat_id, price, img_key_or_url, rating, in_stock, compare_at) ──
 CURATED = [
     ("snu-c001","Baladna Full Fat Fresh Milk 1L","Baladna","Farm-fresh full-fat milk — Qatar's most-consumed fresh milk brand. Processed the same day on their farm north of Doha.",2,7.00,"https://images.openfoodfacts.org/images/products/629/100/300/9842/front_en.3.400.jpg",4.7,True,None),
     ("snu-c002","Baladna Fresh Milk 2L","Baladna","Family-size carton of full-fat fresh milk. No preservatives, locally produced.",2,12.00,None,4.6,True,None),
@@ -136,63 +50,63 @@ CURATED = [
     ("snu-c009","Mazzraty Probiotic Laban Full Fat 1L","Mazzraty","Probiotic laban from Qatar's 100% national NGAAP-certified brand. Full-fat, creamy, great for digestion.",2,6.00,None,4.6,True,None),
     ("snu-c010","Mazzraty Probiotic Laban Full Fat 500ml","Mazzraty","Individual-serve laban with live probiotic cultures.",2,3.50,None,4.5,True,None),
     ("snu-c011","Mazzraty Fresh Full Cream Milk 1L","Mazzraty","100% Qatari full-cream fresh milk from NGAAP farms.",2,8.00,None,4.5,True,None),
-    ("snu-c012","Almarai Fresh Milk 1L","Almarai","Fresh pasteurised full-fat milk from Almarai, the GCC's leading dairy brand.",2,7.25,"https://images.openfoodfacts.org/images/products/628/176/400/0038/front_en.12.400.jpg",4.5,True,None),
+    ("snu-c012","Almarai Fresh Milk 1L","Almarai","Fresh pasteurised full-fat milk from Almarai, the GCC's leading dairy brand.",2,7.25,"almarai",4.5,True,None),
     ("snu-c013","Almarai Cream Cheese 200g","Almarai","Smooth spreadable cream cheese. No artificial preservatives.",2,12.00,None,4.4,True,None),
-    ("snu-c014","Lurpak Butter Slightly Salted 200g","Lurpak","The world's most popular butter — slightly salted, made from fresh cream.",2,16.00,"https://images.openfoodfacts.org/images/products/570/160/003/1154/front_en.34.400.jpg",4.7,True,None),
-    ("snu-c015","Philadelphia Original Cream Cheese 200g","Mondelez","The iconic cream cheese — rich, versatile. Perfect for cheesecakes and bagels.",2,14.00,"https://images.openfoodfacts.org/images/products/768/901/237/0005/front_en.44.400.jpg",4.6,True,None),
+    ("snu-c014","Lurpak Butter Slightly Salted 200g","Lurpak","The world's most popular butter — slightly salted, made from fresh cream.",2,16.00,"lurpak",4.7,True,None),
+    ("snu-c015","Philadelphia Original Cream Cheese 200g","Mondelez","The iconic cream cheese — rich, versatile. Perfect for cheesecakes and bagels.",2,14.00,"philly",4.6,True,None),
     ("snu-c016","Kiri Cream Cheese Portions 8x17.5g","Bel Group","Individually portioned cream cheese — ideal for lunchboxes and kids.",2,12.00,None,4.3,True,None),
     ("snu-c017","Rayyan Natural Mineral Water 1.5L","Rayyan","Natural mineral water from Qatar's own aquifer 60 km north of Doha.",2,2.00,None,4.6,True,None),
     ("snu-c018","Rayyan Natural Mineral Water 6x1.5L","Rayyan","Six-pack of Rayyan — better value for daily hydration.",2,9.50,None,4.6,True,11.50),
     ("snu-c019","Qatar Oasis Balanced Drinking Water 1.5L","Qatar Oasis","Locally produced pH-balanced drinking water.",2,1.50,None,4.2,True,None),
     ("snu-c020","Qatar Oasis Drinking Water 6x1.5L","Qatar Oasis","Bulk pack of Qatar Oasis water — great for households.",2,7.50,None,4.2,True,9.00),
-    ("snu-c021","Aquafina Purified Drinking Water 1.5L","PepsiCo","Seven-step HydRO-7 purified drinking water. Available across all Qatar outlets.",2,2.50,None,4.3,True,None),
-    ("snu-c022","Evian Natural Spring Water 1.5L","Danone","Alpine natural spring water, naturally filtered over 15 years through glacial rocks.",2,5.00,"https://images.openfoodfacts.org/images/products/305/764/025/7773/front_en.343.400.jpg",4.5,True,None),
-    ("snu-c023","Coca-Cola Original Taste 330ml Can","Coca-Cola","The world's favourite soft drink. Served chilled — great with meals.",2,2.50,"https://images.openfoodfacts.org/images/products/544/900/021/4911/front_fr.335.400.jpg",4.5,True,None),
-    ("snu-c024","Coca-Cola Zero Sugar 330ml Can","Coca-Cola","Full Coca-Cola taste, zero sugar and zero calories.",2,2.50,None,4.4,True,None),
+    ("snu-c021","Aquafina Purified Drinking Water 1.5L","PepsiCo","Seven-step HydRO-7 purified drinking water. Available across all Qatar outlets.",2,2.50,"aquafina",4.3,True,None),
+    ("snu-c022","Evian Natural Spring Water 1.5L","Danone","Alpine natural spring water, naturally filtered over 15 years through glacial rocks.",2,5.00,"evian",4.5,True,None),
+    ("snu-c023","Coca-Cola Original Taste 330ml Can","Coca-Cola","The world's favourite soft drink. Served chilled — great with meals.",2,2.50,"coca_cola",4.5,True,None),
+    ("snu-c024","Coca-Cola Zero Sugar 330ml Can","Coca-Cola","Full Coca-Cola taste, zero sugar and zero calories.",2,2.50,"coke_zero",4.4,True,None),
     ("snu-c025","Pepsi Cola 330ml Can","PepsiCo","Refreshing carbonated cola — Pepsi's bold, crisp taste.",2,2.50,None,4.4,True,None),
     ("snu-c026","7UP Lemon-Lime 330ml Can","PepsiCo","Crisp lemon-lime carbonated drink. Caffeine-free, refreshingly light.",2,2.25,None,4.3,True,None),
-    ("snu-c027","Rani Float Mango Juice with Fruit Pieces 240ml","Al Aujan","Iconic Gulf mango juice drink with real fruit pieces. A regional classic enjoyed across Qatar.",2,2.50,"https://images.openfoodfacts.org/images/products/628/176/420/6028/front_en.5.400.jpg",4.7,True,None),
+    ("snu-c027","Rani Float Mango Juice with Fruit Pieces 240ml","Al Aujan","Iconic Gulf mango juice drink with real fruit pieces. A regional classic enjoyed across Qatar.",2,2.50,"rani",4.7,True,None),
     ("snu-c028","Rani Float Orange Juice with Fruit Pieces 240ml","Al Aujan","Orange juice drink with real fruit pieces. Refreshing tropical taste.",2,2.50,None,4.6,True,None),
     ("snu-c029","Almarai Apple & Grape Juice 1L","Almarai","100% blended apple and grape juice. No added sugar, no preservatives.",2,9.50,None,4.5,True,None),
     ("snu-c030","Baladna Fresh Orange Juice 1L","Baladna","Freshly squeezed-style orange juice. No artificial colours or flavours.",2,8.50,None,4.6,True,None),
-    ("snu-c031","Nescafe Classic Instant Coffee 200g","Nestle","Rich roasted aroma with a smooth, full-bodied flavour. Dissolves instantly.",2,17.00,"https://images.openfoodfacts.org/images/products/611/101/890/3161/front_fr.48.400.jpg",4.5,True,None),
+    ("snu-c031","Nescafe Classic Instant Coffee 200g","Nestle","Rich roasted aroma with a smooth, full-bodied flavour. Dissolves instantly.",2,17.00,"nescafe",4.5,True,None),
     ("snu-c032","Nescafe Gold Blend Instant Coffee 95g","Nestle","Premium blend of finely roasted Arabica and Robusta beans. Distinctly smooth taste.",2,26.50,None,4.7,True,None),
     ("snu-c033","Nescafe Arabiana Arabic Coffee with Cardamom 20 Sachets","Nestle","Authentic Arabic coffee with real cardamom in single-serve sachets. A beloved Qatari morning ritual.",2,13.50,None,4.8,True,None),
     ("snu-c034","Nescafe 3-in-1 Original Coffee Mix 20 Sachets","Nestle","Coffee, creamer, and sugar in one sachet — just add hot water.",2,19.50,None,4.3,True,None),
     ("snu-c035","Cafe Najjar Classic Ground Coffee with Cardamom 200g","Cafe Najjar","Traditional Arabic ground coffee with cardamom from Lebanon's iconic brand.",2,16.00,None,4.7,True,None),
     ("snu-c036","Al Rifai Turkish Ground Coffee with Cardamom 250g","Al Rifai","Finely ground Turkish-style coffee enriched with cardamom. Bold and aromatic.",2,23.75,None,4.6,True,None),
-    ("snu-c037","Lipton Yellow Label Black Tea 100 Bags","Unilever","Bright, brisk black tea — perfect with milk, lemon, or plain.",2,18.00,"https://images.openfoodfacts.org/images/products/800/235/005/4231/front_en.21.400.jpg",4.6,True,None),
+    ("snu-c037","Lipton Yellow Label Black Tea 100 Bags","Unilever","Bright, brisk black tea — perfect with milk, lemon, or plain.",2,18.00,"lipton",4.6,True,None),
     ("snu-c038","Ahmad Tea English Breakfast 100 Bags","Ahmad Tea","Premium English Breakfast blend — rich, malty, full-bodied. Popular in Qatar cafes.",2,22.00,None,4.7,True,None),
     ("snu-c039","Lipton Green Tea 100 Bags","Unilever","Light refreshing green tea with natural antioxidants. Great hot or chilled.",2,18.00,None,4.4,True,None),
     ("snu-c040","L'usine White Toast Bread 500g","Almarai","Soft white sliced toast bread from L'usine by Almarai. Fresh-baked, evenly sliced.",2,5.50,None,4.5,True,None),
     ("snu-c041","L'usine Whole Wheat Toast Bread 500g","Almarai","Whole wheat toast bread — higher in fibre, hearty flavour.",2,6.00,None,4.4,True,None),
     ("snu-c042","QBake White Sandwich Bread 500g","QBake","Locally baked white sandwich bread from Qatar's own QBake brand.",2,4.75,None,4.3,True,None),
     ("snu-c043","Arabic Pita Bread 10 Pieces","Local Bakery","Freshly baked thin Arabic pita bread. Essential for shawarma, hummus, and Gulf breakfasts.",2,3.50,None,4.6,True,None),
-    ("snu-c044","Nutella Hazelnut & Cocoa Spread 400g","Ferrero","The world's favourite hazelnut spread with cocoa. Rich and creamy on toast or waffles.",2,18.00,"https://images.openfoodfacts.org/images/products/000/008/017/6800/front_en.273.400.jpg",4.9,True,None),
+    ("snu-c044","Nutella Hazelnut & Cocoa Spread 400g","Ferrero","The world's favourite hazelnut spread with cocoa. Rich and creamy on toast or waffles.",2,18.00,"nutella",4.9,True,None),
     ("snu-c045","Doha Dates Medjool Premium 500g","Doha Dates","Plump, soft Medjool dates from Doha Dates by NAFCO — Qatar's largest date processor.",2,16.75,None,4.8,True,None),
     ("snu-c046","Doha Dates Khalas 500g","Doha Dates","Khalas dates — considered the finest Gulf dates. Deep toffee-honey flavour. Grown in Qatar.",2,12.00,None,4.9,True,None),
     ("snu-c047","Doha Dates Sukkari 500g","Doha Dates","Sukkari dates — ultra-sweet, melt-in-the-mouth. A Ramadan and Eid favourite.",2,11.00,None,4.8,True,None),
     ("snu-c048","Bateel Kholas Premium Dates Gift Box 300g","Bateel","Luxury Kholas dates in a signature Bateel gift box. Hand-selected and elegantly presented.",2,55.00,None,4.9,True,None),
     ("snu-c049","Bateel Organic Assorted Dates Gift Box 500g","Bateel","Curated Bateel organic dates — Kholas, Wanan, and Segae — in a luxurious gift box.",2,89.00,None,5.0,True,None),
     ("snu-c050","Local Medjool Dates 1kg","Local Farm","Fresh Medjool dates from Qatari farms. Large, moist, naturally sweet.",2,30.00,None,4.7,True,None),
-    ("snu-c051","Pringles Original Chips 165g","Kellogg's","The iconic stackable crisp with Pringles' signature original flavour.",2,11.00,"https://images.openfoodfacts.org/images/products/038/000/845/5963/front_en.15.400.jpg",4.6,True,None),
+    ("snu-c051","Pringles Original Chips 165g","Kellogg's","The iconic stackable crisp with Pringles' signature original flavour.",2,11.00,"pringles",4.6,True,None),
     ("snu-c052","Pringles Sour Cream & Onion 165g","Kellogg's","Fan-favourite flavour — tangy, savoury, impossible to put down.",2,11.00,None,4.7,True,None),
     ("snu-c053","Pringles Hot & Spicy 165g","Kellogg's","Bold, fiery kick in Pringles' signature stackable crisp format.",2,11.00,None,4.5,True,None),
     ("snu-c054","Doritos Nacho Cheese 48g","PepsiCo","Boldly flavoured nacho cheese tortilla chips. A party staple across Qatar.",2,4.50,None,4.5,True,None),
     ("snu-c055","Doritos Cool Ranch 48g","PepsiCo","Cool, tangy ranch flavour on Doritos' crunchy triangular chips.",2,4.50,None,4.5,True,None),
     ("snu-c056","Lay's Classic Potato Chips 145g","PepsiCo","Light, crispy potato chips with a simple salted flavour. A Qatar household staple.",2,7.50,None,4.5,True,None),
     ("snu-c057","Lay's BBQ Flavour 145g","PepsiCo","Smoky BBQ seasoned potato chips — rich, tangy, and perfectly balanced.",2,7.50,None,4.4,True,None),
-    ("snu-c058","KitKat 4-Finger Milk Chocolate 45g","Nestle","Crispy wafer covered in smooth milk chocolate. Qatar's best-selling chocolate bar.",2,4.00,"https://images.openfoodfacts.org/images/products/400/009/007/5050/front_en.131.400.jpg",4.7,True,None),
-    ("snu-c059","Cadbury Dairy Milk 90g","Mondelez","Creamy, smooth British milk chocolate. A household name in Qatar.",2,7.00,None,4.7,True,None),
+    ("snu-c058","KitKat 4-Finger Milk Chocolate 45g","Nestle","Crispy wafer covered in smooth milk chocolate. Qatar's best-selling chocolate bar.",2,4.00,"kitkat",4.7,True,None),
+    ("snu-c059","Cadbury Dairy Milk 90g","Mondelez","Creamy, smooth British milk chocolate. A household name in Qatar.",2,7.00,"cadbury",4.7,True,None),
     ("snu-c060","Twix Caramel Chocolate Bar 58g","Mars","Crunchy biscuit, smooth caramel, and milk chocolate — the classic twin bar.",2,4.00,None,4.6,True,None),
     ("snu-c061","Snickers Chocolate Bar 52g","Mars","Peanuts, caramel, nougat, and milk chocolate. One of Qatar's top confectionery bars.",2,4.00,None,4.6,True,None),
     ("snu-c062","M&M's Peanut Chocolate 250g","Mars","Whole peanuts coated in milk chocolate and a colourful candy shell. Great for sharing.",2,16.00,None,4.7,True,None),
-    ("snu-c063","Tilda Pure Basmati Rice 2kg","Tilda","The world's finest basmati rice — long, slender, naturally aromatic grains.",2,24.00,"https://images.openfoodfacts.org/images/products/500/030/126/8620/front_en.38.400.jpg",4.8,True,None),
+    ("snu-c063","Tilda Pure Basmati Rice 2kg","Tilda","The world's finest basmati rice — long, slender, naturally aromatic grains.",2,24.00,"tilda",4.8,True,None),
     ("snu-c064","Golden Sella Basmati Rice 5kg","Golden","Parboiled basmati rice ideal for biryani, kabsa, and machboos.",2,32.00,None,4.6,True,38.00),
     ("snu-c065","Mazzraty Fresh Eggs Large 12 Pieces","Mazzraty","Fresh large eggs from Mazzraty's 100% Qatari poultry farms.",2,11.00,None,4.7,True,None),
     ("snu-c066","Americana Chicken Breast Fillets 1kg","Americana","Boneless, skinless chicken fillets — Halal-certified, IQF frozen.",2,28.00,None,4.5,True,None),
     ("snu-c067","Hellmann's Real Mayonnaise 400g","Unilever","Rich, creamy real mayonnaise. The go-to condiment for sandwiches and dips.",2,14.00,None,4.6,True,None),
-    ("snu-c068","Heinz Tomato Ketchup 570g","Kraft Heinz","Thick, tangy, naturally sweet ketchup. Essential in every Qatari household.",2,12.00,"https://images.openfoodfacts.org/images/products/000/001/700/7033/front_en.280.400.jpg",4.7,True,None),
+    ("snu-c068","Heinz Tomato Ketchup 570g","Kraft Heinz","Thick, tangy, naturally sweet ketchup. Essential in every Qatari household.",2,12.00,"heinz",4.7,True,None),
     # Flowers & Gifting (1)
     ("snu-c069","Red Rose Bouquet 12 Stems","Snooflower","Twelve fresh-cut red roses wrapped in premium floral paper. Delivered same day across Doha.",1,85.00,None,4.7,True,None),
     ("snu-c070","Mixed Seasonal Flowers Arrangement","Snooflower","Vibrant hand-arranged bouquet of seasonal blooms — roses, lilies, and fillers.",1,120.00,None,4.6,True,None),
@@ -274,80 +188,351 @@ CURATED = [
     ("snu-c138","Pritt Stick Glue 43g","Henkel","Clean, washable glue stick — mess-free adhesive for school and office projects.",10,8.00,None,4.4,True,None),
 ]
 
+# ── Extra products (name, brand, desc, cat_id, price, img_key_or_None, rating, in_stock, compare_at) ──
+EXTRA = [
+    # ── Flowers & Gifting (1) ─────────────────────────────────────────────────
+    ("Pink Rose Bouquet 12 Stems","Snooflower","Soft pink roses for birthdays and romantic occasions. Wrapped in premium paper, same-day Doha delivery.",1,85.00,None,4.6,True,None),
+    ("White Rose Bouquet 10 Stems","Snooflower","Pure white roses symbolising elegance and new beginnings. Perfect for weddings and anniversaries.",1,80.00,None,4.7,True,None),
+    ("Yellow Rose Bouquet 12 Stems","Snooflower","Cheerful yellow roses — perfect for friendship and congratulations.",1,75.00,None,4.5,True,None),
+    ("Mixed Rose Bouquet 20 Stems","Snooflower","Twenty mixed-colour roses in a luxury water-resistant wrap.",1,110.00,None,4.7,True,None),
+    ("Luxury Rose Hat Box 25 Stems","Snooflower","Roses arranged in a signature hat box — ideal for premium gifting in Doha.",1,195.00,None,4.8,True,None),
+    ("Preserved Rose Box 16 Stems","Snooflower","Preserved roses in a luxury velvet box — lasts up to a year without water.",1,320.00,None,4.9,True,None),
+    ("Garden Tulip Bouquet 15 Stems","Snooflower","Vibrant mixed tulips in spring colours. Long stems, fresh cut daily.",1,90.00,None,4.7,True,None),
+    ("Peony Bouquet 8 Stems","Snooflower","Lush, full peony blooms in blush pink — a luxury gifting choice for special occasions.",1,145.00,None,4.8,True,None),
+    ("Purple Orchid Potted Plant","Snooflower","Elegant purple Phalaenopsis orchid in a decorative ceramic pot.",1,170.00,None,4.8,True,None),
+    ("Money Plant in Ceramic Pot","Snooflower","Lucky money plant (Epipremnum) — indoor air purifier, easy to maintain.",1,55.00,None,4.5,True,None),
+    ("Peace Lily Potted Plant","Snooflower","Elegant peace lily — thrives indoors, air-purifying, and long-lasting.",1,65.00,None,4.6,True,None),
+    ("Rose & Ferrero Rocher Gift Box","Snooflower","Six red roses with a 16-piece Ferrero Rocher box in a luxury bag.",1,145.00,None,4.8,True,None),
+    ("Premium Chocolate & Flower Hamper","Snooflower","Roses paired with Godiva and Lindt chocolates in a signature gift box.",1,220.00,None,4.8,True,None),
+    ("Eid Mubarak Flower & Dates Hamper","Snooflower","Curated Eid gift — mixed flowers, Khalas dates, and Arabic sweets.",1,185.00,None,4.9,True,None),
+    ("Graduation Balloon Bouquet with Bear","Snooflower","Five graduation balloons and a plush teddy bear — same-day delivery in Doha.",1,85.00,None,4.6,True,None),
+    ("Giant Foil Number Balloons 30th Birthday","Snooflower","Gold foil number '30' balloons with matching star accents.",1,75.00,None,4.6,True,None),
+    ("Luxury Scented Candle Rose & Oud 200g","Luxury Home","Premium rose and oud scented soy wax candle. Burns for 50+ hours.",1,195.00,None,4.8,True,None),
+    ("Ramadan Kareem Luxury Gift Hamper","Snooflower","Dates, Arabic sweets, oud incense, and prayer beads in a luxury box.",1,250.00,None,4.9,True,None),
+    ("Baby Welcome Hamper","Snooflower","Newborn hamper with plush toy, muslin wrap, and baby care essentials.",1,150.00,None,4.8,True,None),
+    ("Succulent Plant Set 3 Mini Pots","Snooflower","Three mini succulents in terracotta pots — low-maintenance and charming.",1,45.00,None,4.6,True,None),
+    # ── Grocery – Dairy (2) ───────────────────────────────────────────────────
+    ("Baladna Chocolate Flavoured Milk 200ml","Baladna","Ready-to-drink chocolate milk made from fresh Qatar milk. A lunchbox favourite.",2,2.50,None,4.6,True,None),
+    ("Baladna Strawberry Flavoured Milk 200ml","Baladna","Fresh strawberry-flavoured milk — kids love it, parents trust Baladna quality.",2,2.50,None,4.6,True,None),
+    ("Baladna Labneh 250g","Baladna","Strained yoghurt cheese with olive oil — a Levantine breakfast staple.",2,9.00,None,4.7,True,None),
+    ("Mazzraty Ayran Drinking Yoghurt 330ml","Mazzraty","Chilled Ayran — the salted Turkish-style drinking yoghurt popular across the Gulf.",2,3.50,None,4.5,True,None),
+    ("Mazzraty Labneh Full Fat 500g","Mazzraty","Premium strained labneh from Qatar's own NGAAP dairy farm.",2,14.00,None,4.7,True,None),
+    ("Puck Cream Cheese Spread 240g","Savola","Smooth cream cheese widely used in Arabic breakfasts across Qatar.",2,12.00,"philly",4.5,True,None),
+    ("Almarai Feta Cheese Crumbled 200g","Almarai","Crumbled Greek-style feta in brine — ideal for salads and fattoush.",2,14.50,None,4.5,True,None),
+    ("Almarai Gouda Cheese Slices 200g","Almarai","Semi-hard Gouda slices — popular in sandwiches and manaesh across Qatar.",2,16.00,None,4.4,True,None),
+    ("President Butter Unsalted 250g","Lactalis","French-style unsalted butter from President — preferred by chefs and bakers.",2,18.00,"lurpak",4.6,True,None),
+    ("Lurpak Spreadable 400g","Arla","Soft spreadable version of Lurpak — directly from the fridge onto your bread.",2,20.00,"lurpak",4.6,True,None),
+    ("Almarai UHT Full Fat Milk 1L","Almarai","Long-life UHT milk — great for pantry stocking with a 6-month shelf life.",2,5.50,"almarai",4.4,True,None),
+    ("Almarai UHT Low Fat Milk 1L","Almarai","UHT low-fat milk — same great Almarai quality, less fat.",2,5.25,"almarai",4.3,True,None),
+    ("Kraft Cheddar Cheese Slices 400g","Kraft","Individually wrapped Cheddar slices — melts perfectly on burgers.",2,22.00,None,4.5,True,None),
+    ("Almarai Double Cream 250ml","Almarai","Rich, thick double cream — ideal for desserts and cooking sauces.",2,8.00,"almarai",4.5,True,None),
+    ("Mazzraty Fresh Eggs Large 30 Pieces","Mazzraty","Bulk tray of 30 large fresh eggs from Qatar's own NGAAP poultry farms.",2,24.00,None,4.7,True,None),
+    ("Arla Organic Full Fat Milk 1L","Arla","Certified organic whole milk — grass-fed cows, no antibiotics.",2,9.50,"almarai",4.6,True,None),
+    # ── Grocery – Waters & Soft Drinks (2) ───────────────────────────────────
+    ("Rayyan Sparkling Mineral Water 330ml","Rayyan","Lightly sparkling Qatar mineral water — refreshing and locally produced.",2,2.00,None,4.5,True,None),
+    ("Rayyan Sparkling Mineral Water 1.5L","Rayyan","Large sparkling water from Qatar's own Rayyan brand.",2,5.00,None,4.5,True,None),
+    ("S.Pellegrino Sparkling Natural Water 750ml","Nestlé","Italy's iconic sparkling mineral water. A premium table water choice in Doha.",2,8.00,"pellegrino",4.6,True,None),
+    ("Perrier Sparkling Natural Water 330ml Can","Nestlé","Crisp, refreshing French sparkling water with natural carbonation.",2,4.50,None,4.5,True,None),
+    ("Evian Natural Spring Water 500ml","Danone","Alpine spring water in a convenient 500ml bottle.",2,4.00,"evian",4.5,True,None),
+    ("Aquafina Purified Water 500ml","PepsiCo","HydRO-7 purified drinking water in a handy 500ml bottle.",2,2.00,"aquafina",4.3,True,None),
+    ("Volvic Natural Mineral Water 1.5L","Danone","Volcanic mineral water from Auvergne, France — smooth and mineral-rich.",2,5.50,None,4.4,True,None),
+    ("Masafi Natural Mineral Water 1.5L","Masafi","UAE's No.1 mineral water brand — popular across all Qatar supermarkets.",2,2.50,None,4.3,True,None),
+    ("Fanta Orange 330ml Can","Coca-Cola","Fruity, fizzy orange soft drink from the house of Coca-Cola.",2,2.50,None,4.3,True,None),
+    ("Fanta Grape 330ml Can","Coca-Cola","Sweet and fizzy grape flavour — a popular Gulf market choice.",2,2.50,None,4.3,True,None),
+    ("Sprite Lemon-Lime 330ml Can","Coca-Cola","Crisp, clean lemon-lime carbonated soft drink. Caffeine-free.",2,2.50,None,4.3,True,None),
+    ("Mountain Dew 330ml Can","PepsiCo","Bold citrus-flavoured carbonated soft drink — intensely refreshing.",2,2.50,None,4.3,True,None),
+    ("Red Bull Energy Drink 250ml","Red Bull GmbH","Vitalises body and mind. Caffeine, taurine, and B-vitamins in a single can.",2,6.00,None,4.4,True,None),
+    ("Monster Energy Original Green 500ml","Monster Beverage","Triple filtered, lightly carbonated energy drink — the classic green can.",2,9.00,None,4.3,True,None),
+    ("Mirinda Orange 330ml Can","PepsiCo","Sweet orange carbonated soft drink — a kids' party staple across Qatar.",2,2.25,None,4.2,True,None),
+    ("Coca-Cola Original 1.5L Bottle","Coca-Cola","The classic Coca-Cola in a family-size bottle for home occasions.",2,5.50,"coca_cola",4.5,True,None),
+    ("Pepsi Cola 1.5L Bottle","PepsiCo","Bold Pepsi taste in a large bottle — ideal for gatherings.",2,5.00,None,4.4,True,None),
+    ("Schweppes Tonic Water 330ml Can","Coca-Cola","The original mixer — crisp quinine tonic perfect with gin.",2,4.00,None,4.4,True,None),
+    ("Vimto Fruit Cordial Squash 250ml","Nichols","Beloved British-origin fruit squash — extremely popular in Qatar and GCC.",2,3.50,None,4.5,True,None),
+    # ── Grocery – Juices (2) ─────────────────────────────────────────────────
+    ("Almarai Orange Juice 1L","Almarai","100% not-from-concentrate orange juice. No added sugar or preservatives.",2,9.50,None,4.6,True,None),
+    ("Almarai Mango Juice 1L","Almarai","Tropical mango juice drink — rich, sweet, and beloved across Qatar.",2,9.00,None,4.6,True,None),
+    ("Almarai Mixed Fruit Juice 1L","Almarai","A blend of tropical fruits — guava, mango, and passion fruit.",2,9.00,None,4.5,True,None),
+    ("Cappy Orange Juice 1L","Coca-Cola","Refreshing orange juice drink from Coca-Cola's Cappy brand.",2,7.50,"cappy",4.4,True,None),
+    ("Rani Float Strawberry 240ml","Al Aujan","Strawberry juice drink with real fruit pieces. A Gulf classic.",2,2.50,None,4.6,True,None),
+    ("Rani Float Lychee 240ml","Al Aujan","Exotic lychee juice with real fruit pieces. Light, sweet, and tropical.",2,2.50,"rani",4.6,True,None),
+    ("Tropicana Orange Juice No Pulp 1L","PepsiCo","Premium squeezed orange juice — smooth, no pulp, no added sugar.",2,12.00,None,4.7,True,None),
+    ("Rubicon Mango Juice Drink 288ml","Cott Beverages","Mango juice with a tropical twist — popular in Qatar's South Asian community.",2,3.00,None,4.5,True,None),
+    ("Minute Maid Pulpy Orange 300ml","Coca-Cola","Orange juice with real pulp for a freshly-squeezed experience.",2,3.50,None,4.4,True,None),
+    # ── Grocery – Coffee & Tea (2) ────────────────────────────────────────────
+    ("Ahmad Tea Earl Grey 100 Bags","Ahmad Tea","Fragrant Earl Grey blend with bergamot oil — a Qatari café favourite.",2,22.00,"lipton",4.6,True,None),
+    ("Ahmad Tea Green Tea 100 Bags","Ahmad Tea","Delicate green tea with a light, refreshing flavour. Rich in antioxidants.",2,20.00,None,4.5,True,None),
+    ("Twinings English Breakfast 50 Bags","Twinings","Classic English Breakfast blend — bold, full-bodied, great with milk.",2,18.00,None,4.5,True,None),
+    ("Twinings Green Tea & Lemon 50 Bags","Twinings","Refreshing green tea with a zesty lemon lift.",2,18.00,None,4.4,True,None),
+    ("Lipton Chamomile Herbal Tea 20 Bags","Unilever","Soothing chamomile tea for calm evenings. Naturally caffeine-free.",2,9.50,"lipton",4.5,True,None),
+    ("Nescafe Gold Espresso 12 Pods","Nestle","Intense espresso capsules compatible with Dolce Gusto machines.",2,22.00,"nescafe",4.6,True,None),
+    ("Lavazza Espresso Italiano Ground Coffee 250g","Lavazza","A rich blend of Arabica and Robusta — Italy's No.1 espresso coffee.",2,28.00,None,4.7,True,None),
+    ("Milo Energy Chocolate Drink Powder 400g","Nestle","Chocolate malt drink for growing kids — packed with energy and vitamins.",2,16.00,"nesquik",4.6,True,None),
+    ("Nesquik Chocolate Powder 400g","Nestle","Instant chocolate milk powder — add to milk for a delicious drink.",2,14.50,"nesquik",4.5,True,None),
+    ("Karak Chai Masala Spiced Tea 250g","Local Brand","Aromatic spiced tea blend — cardamom, ginger, and cloves. The Gulf's favourite morning drink.",2,12.00,None,4.8,True,None),
+    # ── Grocery – Bread & Bakery (2) ─────────────────────────────────────────
+    ("L'usine Brioche Rolls 6 Pack","Almarai","Soft, buttery brioche rolls — ideal for sliders and breakfast.",2,8.00,None,4.5,True,None),
+    ("Almarai Brown Toast Bread 500g","Almarai","Wholegrain brown toast bread — fibre-rich and nutritious.",2,6.00,None,4.5,True,None),
+    ("Sesame Arabic Bread Kaak 250g","Local Bakery","Crunchy sesame ring bread — a Levantine snack enjoyed across Qatar.",2,4.00,None,4.4,True,None),
+    # ── Grocery – Breakfast & Cereals (2) ────────────────────────────────────
+    ("Kellogg's Corn Flakes 500g","Kellogg's","The original breakfast cereal — crunchy, light, and great with cold milk.",2,12.00,None,4.5,True,None),
+    ("Kellogg's Frosties 375g","Kellogg's","Sugar-frosted corn flakes — the sweet breakfast favourite for kids.",2,12.00,None,4.5,True,None),
+    ("Quaker Oats Original 1kg","PepsiCo","100% whole grain rolled oats — a nutritious, filling breakfast.",2,14.00,None,4.6,True,None),
+    ("Kellogg's Special K Red Berries 375g","Kellogg's","Light and crispy cereal with dried strawberries — a balanced breakfast choice.",2,14.00,None,4.5,True,None),
+    ("Weetabix Original 24 Biscuits","Weetabix","Whole grain wheat biscuits — a high-fibre UK classic loved across Qatar.",2,12.00,None,4.5,True,None),
+    ("Kellogg's Coco Pops 375g","Kellogg's","Chocolate puffed rice cereal that turns your milk chocolatey.",2,12.00,None,4.6,True,None),
+    ("Alpen Original Muesli 750g","Weetabix","Rolled oats with nuts, dried fruit, and wheatflakes — a nutritious start.",2,16.00,None,4.5,True,None),
+    ("Nature Valley Crunchy Oats & Honey 5 Bars","General Mills","Crunchy granola bars with whole grain oats and pure honey.",2,8.50,None,4.5,True,None),
+    # ── Grocery – Condiments & Sauces (2) ────────────────────────────────────
+    ("Maggi Chicken Stock Cubes 20 Pack","Nestle","Essential kitchen stock cubes — adds deep, savoury chicken flavour instantly.",2,5.50,None,4.5,True,None),
+    ("Tabasco Red Pepper Sauce 150ml","McIlhenny","The original Louisiana hot sauce — tangy, spicy, and all-natural.",2,12.00,None,4.6,True,None),
+    ("Nando's Peri-Peri Sauce Medium 275g","Nando's","The famous medium peri-peri sauce from Nando's. Great as a marinade or dip.",2,14.00,None,4.7,True,None),
+    ("Hellmann's Light Mayonnaise 400g","Unilever","All the creaminess of Hellmann's with less fat. Ideal for health-conscious eaters.",2,13.00,None,4.5,True,None),
+    ("Lee Kum Kee Oyster Sauce 255ml","Lee Kum Kee","Premium Chinese oyster sauce — adds rich umami depth to stir-fries.",2,7.50,None,4.6,True,None),
+    ("Kikkoman Naturally Brewed Soy Sauce 150ml","Kikkoman","Japan's finest naturally brewed soy sauce — smooth, deep flavour.",2,8.00,None,4.7,True,None),
+    ("Emirates Tahini Sesame Paste 400g","Emirates","Pure roasted sesame paste — essential for hummus, salad dressings, and dips.",2,10.00,None,4.6,True,None),
+    ("Mina Harissa Paste 135g","Mina","Authentic Moroccan harissa — smoky chilli paste with olive oil and spices.",2,8.00,None,4.5,True,None),
+    ("Al Alali Tomato Paste 135g","Al Alali","Concentrated tomato paste — rich, deep flavour for sauces and stews.",2,3.00,None,4.4,True,None),
+    ("HP Brown Sauce 425g","H.J. Heinz","The classic British brown sauce — tangy, spiced, and loved in Qatar's expat community.",2,10.00,"heinz",4.5,True,None),
+    # ── Grocery – Rice, Pasta & Grains (2) ───────────────────────────────────
+    ("Daawat Super Basmati Rice 5kg","Daawat","Long-grain aromatic basmati from India's premier rice brand. Perfect for machboos.",2,32.00,"tilda",4.7,True,None),
+    ("Spaghetti Barilla No.5 500g","Barilla","Italy's best-selling pasta — durum wheat semolina, perfectly textured.",2,5.00,None,4.6,True,None),
+    ("Penne Rigate Pasta Barilla 500g","Barilla","Classic ridged penne — holds sauces beautifully. Al dente every time.",2,5.00,None,4.5,True,None),
+    ("Fusilli Pasta Barilla 500g","Barilla","Spiral pasta that traps chunky sauces. Great for pasta salads.",2,5.00,None,4.5,True,None),
+    ("Egyptian Short Grain Rice 5kg","Local Brand","Short-grain rice ideal for stuffed vegetables and Middle Eastern dishes.",2,22.00,None,4.4,True,None),
+    ("Red Lentils 1kg","Local Brand","Split red lentils — cook quickly, perfect for dal and lentil soup.",2,6.00,None,4.5,True,None),
+    ("Chickpeas Dried 1kg","Local Brand","Dried chickpeas — the base for hummus, falafel, and fatteh.",2,7.00,None,4.4,True,None),
+    ("Couscous Medium Grain 500g","Local Brand","Quick-cook medium couscous — ready in 5 minutes, great with tagines.",2,8.00,None,4.4,True,None),
+    # ── Grocery – Canned & Packaged (2) ──────────────────────────────────────
+    ("Heinz Baked Beans in Tomato Sauce 415g","Kraft Heinz","Classic British baked beans — a quick, protein-rich meal on toast.",2,6.00,"heinz",4.5,True,None),
+    ("John West Tuna in Springwater 185g","Thai Union","Sustainably sourced tuna fillet in spring water. High protein, low fat.",2,7.50,None,4.5,True,None),
+    ("Al Alali Sardines in Tomato Sauce 125g","Al Alali","Tender sardines in rich tomato sauce — a Gulf pantry staple.",2,4.00,None,4.3,True,None),
+    ("Cirio Crushed Tomatoes 400g","Cirio","Premium Italian crushed tomatoes — sun-ripened, for pasta sauces.",2,5.00,None,4.5,True,None),
+    ("Green Giant Sweetcorn 340g Can","General Mills","Tender whole kernel sweetcorn — great for salads, soups, and sides.",2,4.50,None,4.4,True,None),
+    ("Eagle Brand Sweetened Condensed Milk 397g","Borden","Rich condensed milk — essential for desserts, karak tea, and Arabic sweets.",2,6.00,None,4.6,True,None),
+    # ── Grocery – Frozen Foods (2) ────────────────────────────────────────────
+    ("McCain Crinkle Cut Oven Chips 750g","McCain","Easy oven-baked crinkle cut chips — crispy outside, fluffy inside.",2,14.00,None,4.5,True,None),
+    ("Americana Chicken Nuggets 400g","Americana","Juicy Halal chicken nuggets — kids' all-time favourite. Oven or air-fryer ready.",2,18.00,None,4.6,True,None),
+    ("Sadia Chicken Wings Frozen 1kg","Sadia","Halal-certified IQF chicken wings — perfect for grilling or air-frying.",2,22.00,None,4.5,True,None),
+    ("Birds Eye Garden Peas 900g","Nomad Foods","Sweet garden peas — picked at peak freshness and frozen within hours.",2,10.00,None,4.4,True,None),
+    ("Al Kabeer Beef Burger Patties 8 Pack","Al Kabeer","Juicy Halal beef burgers — ready in minutes on the grill or pan.",2,28.00,None,4.5,True,None),
+    ("Americana Beef Kofta Frozen 400g","Americana","Spiced minced beef kofta — grill or bake for a quick Middle Eastern dinner.",2,18.00,None,4.5,True,None),
+    # ── Grocery – Chocolate & Confectionery (2) ───────────────────────────────
+    ("Lindt Excellence Dark 70% 100g","Lindt & Sprungli","Intense dark chocolate with deep cocoa notes. Smooth Swiss finish.",2,12.00,"lindt70",4.8,True,None),
+    ("Lindt Excellence Dark 85% 100g","Lindt & Sprungli","Extra-dark 85% cocoa — rich, bittersweet, and deeply satisfying.",2,12.00,"lindt85",4.7,True,None),
+    ("Bounty Coconut & Chocolate Bar 57g","Mars","Creamy coconut covered in smooth milk chocolate. A Gulf classic.",2,4.00,None,4.5,True,None),
+    ("Galaxy Milk Chocolate Bar 42g","Mars","Exceptionally smooth milk chocolate with a velvety melt. Popular in Qatar.",2,4.00,None,4.6,True,None),
+    ("After Eight Mint Chocolate Thins 200g","Nestle","Crisp mint fondant in dark chocolate. The iconic after-dinner treat.",2,18.00,None,4.7,True,None),
+    ("Ferrero Rocher Assorted 16 Pieces","Ferrero","Hazelnut chocolate spheres in a classic gold box — the ultimate Qatar gift.",2,32.00,None,4.9,True,None),
+    ("Toblerone Milk Chocolate 100g","Mondelez","Iconic Swiss milk chocolate with honey-almond nougat. Triangular peaks.",2,10.00,None,4.7,True,None),
+    ("Kinder Bueno Milk Chocolate Wafer 2 Bars","Ferrero","Light, crispy wafer with a creamy hazelnut filling, dipped in chocolate.",2,4.50,None,4.7,True,None),
+    ("Raffaello White Coconut Balls 150g","Ferrero","Delicate coconut-almond confections — a popular Qatar gifting choice.",2,18.00,None,4.7,True,None),
+    ("Haribo Gold Bears 100g","Haribo","The world's most famous gummy bears — fruity, chewy, and fun for all ages.",2,5.00,None,4.5,True,None),
+    ("Oreo Original Sandwich Cookies 154g","Mondelez","The classic twist, lick, and dunk cookie. Crispy cocoa wafers with vanilla cream.",2,7.00,None,4.7,True,None),
+    ("McVitie's Digestive Biscuits Original 250g","Pladis","Wholesome wheat biscuits with a slightly sweet, nutty flavour.",2,8.00,None,4.5,True,None),
+    ("Bahlsen Hit Chocolate Sandwich Biscuits 220g","Bahlsen","Buttery biscuits sandwiched with smooth chocolate cream.",2,9.00,"tuc",4.5,True,None),
+    ("Ritz Crackers Original 200g","Mondelez","Light, buttery crackers — great with cheese, dips, or plain.",2,8.00,"tuc",4.6,True,None),
+    # ── Grocery – Chips & Snacks (2) ─────────────────────────────────────────
+    ("Doritos Flamin' Hot 260g","PepsiCo","Fiery Flamin' Hot flavour on Doritos' iconic tortilla chips.",2,12.00,None,4.4,True,None),
+    ("Cheetos Flamin' Hot 227g","PepsiCo","Dangerously cheesy — intensely flavoured puffed corn snacks.",2,10.00,"pringles",4.4,True,None),
+    ("Lay's Sour Cream & Onion 45g","PepsiCo","Small snack bag of tangy sour cream and onion crisps — perfect for on the go.",2,3.50,None,4.4,True,None),
+    ("Pringles BBQ 165g","Kellogg's","Sweet and smoky BBQ seasoning on Pringles' signature stackable chip.",2,11.00,"pringles",4.5,True,None),
+    ("Wasa Crispy Rye Bread 260g","Barilla","Light, crispy rye crispbread — great with labneh, cheese, or avocado.",2,12.00,"wasa",4.5,True,None),
+    ("Tuc Original Butter Biscuits 100g","Mondelez","Light, savoury crackers with a buttery taste. A popular Qatar snack.",2,4.50,"tuc",4.4,True,None),
+    # ── Grocery – Spreads & Cooking (2) ──────────────────────────────────────
+    ("Smucker's Strawberry Jam 350g","Smucker's","Made from sun-ripened strawberries — no high-fructose corn syrup.",2,12.00,None,4.6,True,None),
+    ("Bonne Maman Raspberry Jam 370g","Bonne Maman","Artisan-style French raspberry jam with whole fruit pieces.",2,15.00,None,4.7,True,None),
+    ("Skippy Peanut Butter Smooth 340g","Hormel","Smooth and creamy peanut butter — great on toast, in smoothies, or with dates.",2,12.00,None,4.6,True,None),
+    ("Lotus Biscoff Spread Smooth 380g","Lotus","The iconic Belgian cookie butter spread — unique caramelised biscuit flavour.",2,18.00,None,4.8,True,None),
+    ("Nutella Hazelnut Spread 750g","Ferrero","Large jar of the world's favourite spread — for generous portions.",2,32.00,"nutella",4.9,True,None),
+    ("Pure Sidr Honey 500g","Local Farm","Raw Sidr honey from Yemen — one of the world's finest honeys.",2,65.00,None,4.9,True,None),
+    ("Al Shifa Natural Honey 500g","Al Shifa","Premium natural honey from Saudi Arabia — a Qatar pantry staple.",2,28.00,None,4.7,True,None),
+    ("Bertolli Extra Virgin Olive Oil 500ml","Bertolli","Cold-pressed extra virgin olive oil from sun-ripened Italian olives.",2,22.00,None,4.6,True,None),
+    ("Afia Sunflower Oil 1.5L","Savola","Refined sunflower oil — light, neutral flavour for everyday cooking.",2,8.50,None,4.4,True,None),
+    ("Shan Biryani Masala 60g","Shan","Authentic biryani spice mix — brings the flavour of South Asian kitchens to Doha.",2,5.00,None,4.6,True,None),
+    # ── Health & Beauty (3) ───────────────────────────────────────────────────
+    ("Omega-3 Fish Oil 1000mg 60 Softgels","Holland & Barrett","Supports heart, brain, and joint health. Odourless softgels.",3,35.00,None,4.6,True,None),
+    ("Vitamin D3 5000 IU 60 Softgels","NOW Foods","Bone, immune, and mood support — especially important in Qatar's indoor lifestyle.",3,28.00,None,4.7,True,None),
+    ("Biotin 10000mcg Hair & Nail Vitamins 60 Capsules","Sports Research","High-potency biotin — promotes hair growth, strong nails, and glowing skin.",3,38.00,None,4.6,True,None),
+    ("Probiotics 50 Billion CFU 30 Capsules","Garden of Life","Ten probiotic strains — supports gut health and immune balance.",3,55.00,None,4.7,True,None),
+    ("Collagen Type 1 & 3 1000mg 60 Tablets","Neocell","Marine collagen for skin elasticity, joint support, and anti-ageing.",3,55.00,None,4.6,True,None),
+    ("Centrum Women Multivitamin 30 Tablets","Pfizer","Complete daily multivitamin for women — iron, folic acid, and 23 nutrients.",3,45.00,None,4.5,True,None),
+    ("Berocca Performance B-Vitamins 15 Effervescent","Bayer","B-vitamins, Vitamin C, and minerals for energy and mental sharpness.",3,28.00,None,4.5,True,None),
+    ("Calcium + Vitamin D3 1200mg 60 Tablets","Nature Made","Supports strong bones and teeth. Essential for Qatar's sun-limited indoor workers.",3,32.00,None,4.6,True,None),
+    ("Turmeric Curcumin 500mg 60 Capsules","Solgar","Anti-inflammatory turmeric with black pepper for maximum absorption.",3,45.00,None,4.6,True,None),
+    ("Melatonin 5mg Sleep Support 60 Tablets","Natrol","Hormone-free sleep aid — helps regulate sleep cycle for shift workers and travellers.",3,28.00,None,4.5,True,None),
+    ("CeraVe Moisturising Cream 177g","L'Oreal","Dermatologist-recommended ceramide moisturiser for dry and sensitive skin.",3,55.00,None,4.8,True,None),
+    ("Cetaphil Gentle Skin Cleanser 500ml","Galderma","Soap-free, fragrance-free cleanser for sensitive skin. Dermatologist trusted.",3,38.00,None,4.7,True,None),
+    ("The Ordinary Niacinamide 10% + Zinc 1% 30ml","DECIEM","Minimises pores, balances sebum, and reduces blemishes.",3,19.00,None,4.7,True,None),
+    ("The Ordinary Hyaluronic Acid 2% + B5 30ml","DECIEM","Multi-depth hydration serum with hyaluronic acid and vitamin B5.",3,19.00,None,4.7,True,None),
+    ("Olay Regenerist Retinol24 Day Cream SPF30 50g","P&G","Retinol-powered anti-ageing moisturiser with broad-spectrum SPF30.",3,65.00,None,4.6,True,None),
+    ("Nivea Body Lotion Shea Butter 400ml","Beiersdorf","48-hour moisture with rich shea butter. Absorbs quickly, non-greasy.",3,15.00,None,4.6,True,None),
+    ("Palmer's Cocoa Butter Formula Lotion 250ml","Palmer's","Pure cocoa butter with vitamin E — repairs dry, rough skin.",3,14.00,None,4.5,True,None),
+    ("Bioderma Sensibio H2O Micellar Water 500ml","Naos","France's No.1 micellar water — gentle make-up remover for sensitive skin.",3,38.00,None,4.8,True,None),
+    ("Neutrogena Norwegian Formula Hand Cream 75g","J&J","Clinically proven to heal very dry hands overnight. Fragrance-free.",3,18.00,None,4.7,True,None),
+    ("Vaseline Intensive Care Lotion 400ml","Unilever","Microdroplets of Vaseline Jelly penetrate 5 skin layers for deep healing.",3,12.00,None,4.6,True,None),
+    ("TRESemmé Keratin Smooth Shampoo 400ml","Unilever","Keratin-infused formula for frizz-free, smooth hair in Qatar's humidity.",3,18.00,None,4.5,True,None),
+    ("Garnier Fructis Strengthening Shampoo 400ml","L'Oreal","Caffeine and plant protein strengthen brittle hair from root to tip.",3,16.00,None,4.5,True,None),
+    ("Schwarzkopf Gliss Hair Repair Conditioner 400ml","Henkel","Liquid keratin repair conditioner — instant smoothness, reduced breakage.",3,18.00,None,4.5,True,None),
+    ("OGX Coconut Milk Shampoo 385ml","Johnson Products","Coconut milk and coconut oil — deeply nourishes dry, frizzy hair.",3,22.00,None,4.6,True,None),
+    ("Elvive Extraordinary Oil Shampoo 400ml","L'Oreal","Six precious oils for radiant, silky hair without weighing it down.",3,18.00,None,4.5,True,None),
+    ("Sensodyne Pronamel Whitening Toothpaste 75ml","GSK","Protects against acid erosion while gently whitening sensitive teeth.",3,19.00,None,4.7,True,None),
+    ("Colgate MaxFresh Toothpaste 125g","Colgate-Palmolive","Micro-whitening crystals for a cool, fresh breath sensation.",3,9.00,None,4.5,True,None),
+    ("Listerine Total Care Mouthwash 500ml","J&J","Kills 99.9% of germs, freshens breath, and strengthens enamel.",3,18.00,None,4.6,True,None),
+    ("Oral-B Advantage Toothbrush 3 Pack","P&G","Indicator bristles show when it's time to replace. Soft for sensitive gums.",3,18.00,None,4.5,True,None),
+    ("Dove Men+Care Clean Comfort Deodorant 150ml","Unilever","48-hour protection with moisturising cream. Non-irritating formula.",3,14.00,None,4.6,True,None),
+    ("Rexona Men Motionsense Active Deodorant 200ml","Unilever","Motion-activated freshness — keeps you dry through Qatar's summer heat.",3,14.00,None,4.5,True,None),
+    ("Gillette Mach3 Sensitive Razor","P&G","Three-blade razor with comfort guard — gentle on sensitive skin.",3,22.00,None,4.6,True,None),
+    ("Veet Suprem Essence Hair Removal Cream 200ml","Reckitt","Fast-acting hair removal for the body. Visible results in 5 minutes.",3,18.00,None,4.3,True,None),
+    ("Johnsons Baby Oil 300ml","J&J","Pure mineral baby oil — gentle enough for babies, loved by adults for skin care.",3,12.00,None,4.6,True,None),
+    ("Strepsils Sore Throat Lozenge Honey & Lemon 24 Pack","Reckitt","Soothing honey and lemon lozenges for sore throat relief.",3,12.00,None,4.5,True,None),
+    ("Voltaren Emulgel 1.16% Pain Relief Gel 100g","Haleon","Deep-penetrating NSAID gel for targeted joint and muscle pain relief.",3,28.00,None,4.7,True,None),
+    # ── Electronics (4) ───────────────────────────────────────────────────────
+    ("Samsung Galaxy S24 256GB Phantom Black","Samsung","Snapdragon 8 Gen 3, 50MP ProVisual camera, 7 years of OS updates.",4,2999.00,None,4.8,True,None),
+    ("Apple iPhone 16 128GB Black","Apple","A18 chip, Camera Control button, and improved low-light photography.",4,3499.00,None,4.9,True,None),
+    ("Xiaomi 14 Ultra 512GB White","Xiaomi","Leica optics, Snapdragon 8 Gen 3, 90W HyperCharge. Premium flagship.",4,3299.00,None,4.7,True,None),
+    ("Apple iPad Air 11-inch M2 128GB","Apple","M2 chip, 11-inch Liquid Retina display, compatible with Apple Pencil Pro.",4,2299.00,None,4.8,True,None),
+    ("Samsung Galaxy Tab S9 FE 128GB","Samsung","6GB RAM, 10.9-inch display, S Pen included. Samsung DeX support.",4,1299.00,None,4.6,True,1499.00),
+    ("Bose QuietComfort 45 Wireless Headphones","Bose","World-class noise cancellation with 24-hour battery life.",4,1299.00,None,4.8,True,1499.00),
+    ("Logitech MX Master 3S Mouse","Logitech","8000 DPI sensor, MagSpeed scroll wheel, works on any surface.",4,299.00,None,4.8,True,None),
+    ("Logitech MX Keys Advanced Wireless Keyboard","Logitech","Smart illuminated keys, perfect stroke depth, multi-device connection.",4,399.00,None,4.7,True,None),
+    ("Marshall Emberton II Portable Speaker","Marshall","IP67 waterproof, 30-hour playtime, 360-degree sound.",4,499.00,None,4.8,True,None),
+    ("Google Nest Mini 2nd Gen Smart Speaker","Google","Compact smart speaker with Google Assistant — controls smart home with voice.",4,149.00,None,4.5,True,None),
+    ("Amazon Echo Dot 5th Gen Smart Speaker","Amazon","Alexa voice control, improved sound, smart home hub built-in.",4,149.00,None,4.5,True,None),
+    ("TP-Link Tapo Smart WiFi Plug 4 Pack","TP-Link","Control devices via app or voice. Schedule timers and monitor energy use.",4,89.00,None,4.6,True,None),
+    ("Philips Hue White Smart Bulb E27 Starter Kit","Signify","3 smart LED bulbs + Hue Bridge — full white ambiance control.",4,249.00,None,4.7,True,None),
+    ("Ring Video Doorbell Wired","Amazon","1080p HD video doorbell with live view and motion detection.",4,299.00,None,4.6,True,None),
+    ("GoPro HERO12 Black Action Camera","GoPro","5.3K video, HyperSmooth 6.0 stabilisation, 27m waterproof.",4,1399.00,None,4.8,True,None),
+    ("Anker 65W USB-C GaN Compact Charger","Anker","Powers a laptop and two devices simultaneously from one compact plug.",4,89.00,None,4.7,True,None),
+    ("Anker 737 Power Bank 140W 24000mAh","Anker","Laptop-grade power bank — charges MacBook Pro from 0% to 50% in 43 minutes.",4,299.00,None,4.7,True,None),
+    ("Kingston DataTraveler 64GB USB 3.2 Flash Drive","Kingston","Fast 200MB/s read speeds, durable metal casing, compact design.",4,29.00,None,4.5,True,None),
+    ("PlayStation 5 DualSense Controller White","Sony","Haptic feedback, adaptive triggers, built-in microphone for PS5.",4,279.00,None,4.8,True,None),
+    ("Xbox Wireless Controller Carbon Black","Microsoft","Textured grip, Bluetooth 5.2, USB-C charging, 40-hour battery life.",4,229.00,None,4.7,True,None),
+    ("Spigen Rugged Armor Case iPhone 16","Spigen","Military-grade drop protection with carbon fibre design.",4,59.00,None,4.7,True,None),
+    ("Belkin Boost Up Charge 15W Wireless Pad","Belkin","15W fast wireless charging for iPhone 15 and MagSafe compatible cases.",4,89.00,None,4.5,True,None),
+    # ── Fashion & Accessories (5) ─────────────────────────────────────────────
+    ("Nike Air Force 1 Low White","Nike","The timeless AF1 in triple white — the most iconic sneaker in Qatar.",5,349.00,None,4.8,True,None),
+    ("Adidas Gazelle Navy Blue","Adidas","The classic Adidas Gazelle suede trainer — minimalist, versatile, retro.",5,289.00,None,4.7,True,None),
+    ("New Balance 574 Grey","New Balance","Heritage runner with EVA foam cushioning — comfort meets street style.",5,299.00,None,4.6,True,None),
+    ("Converse Chuck Taylor All Star Hi White","Converse","The all-time classic high-top canvas sneaker. Pairs with everything.",5,219.00,None,4.7,True,None),
+    ("Vans Old Skool Classic Black White","Vans","The skate-born classic with signature side stripe. Iconic and durable.",5,229.00,None,4.7,True,None),
+    ("Timberland 6-Inch Premium Wheat Boots","Timberland","Waterproof nubuck leather, padded collar, rubber lug sole — built to last.",5,599.00,None,4.7,True,None),
+    ("Levi's 511 Slim Fit Jeans Dark Blue","Levi's","The perfect slim — sits below waist, slim through thigh and leg.",5,299.00,None,4.7,True,None),
+    ("Ralph Lauren Polo Classic Fit T-Shirt White","Ralph Lauren","Iconic pony-embroidered soft cotton jersey tee. A Doha wardrobe essential.",5,149.00,None,4.7,True,None),
+    ("Lacoste Regular Fit Polo Shirt White","Lacoste","The classic petit piqué cotton polo — timeless style from the crocodile brand.",5,299.00,None,4.7,True,None),
+    ("Nike Sportswear Club Fleece Hoodie Grey","Nike","Heavyweight fleece for cool Gulf evenings. Kangaroo pocket and drawcord hood.",5,219.00,None,4.6,True,None),
+    ("Herschel Classic Backpack 25L Navy","Herschel","Laptop sleeve, organiser pocket, and retro styling in durable fabric.",5,249.00,None,4.6,True,None),
+    ("Samsonite Spinner Trolley 68cm Graphite","Samsonite","4-wheel spinner trolley with TSA lock. Hardshell, lightweight.",5,849.00,None,4.7,True,None),
+    ("Fossil Minimalist Slim Watch Rose Gold","Fossil","Three-hand date display, rose gold-tone stainless steel bracelet.",5,699.00,None,4.5,True,None),
+    ("Daniel Wellington Classic Petite Watch Rose Gold","Daniel Wellington","Ultra-slim Scandinavian design with interchangeable NATO strap.",5,599.00,None,4.6,True,None),
+    ("Pandora Moments Curb Chain Bracelet Silver","Pandora","Sterling silver curb chain bracelet — pairs with all Pandora charms.",5,199.00,None,4.7,True,None),
+    ("Oakley Holbrook Polarized Sunglasses","Oakley","High-Definition Optics, Plutonite lens, O-Matter frame. UV protection.",5,649.00,None,4.8,True,None),
+    # ── Home & Garden (6) ────────────────────────────────────────────────────
+    ("Philips Air Fryer Essential 4.1L","Philips","Rapid Air technology — fry, bake, grill, and roast with little to no oil.",6,299.00,None,4.7,True,349.00),
+    ("Instant Pot Duo 7-in-1 6L Pressure Cooker","Instant Brands","Pressure cooker, slow cooker, rice cooker, steamer — all in one.",6,449.00,None,4.8,True,None),
+    ("Nespresso Vertuo Next Coffee Machine","Nestle","Centrifusion technology brews coffee and espresso with one button.",6,499.00,None,4.7,True,None),
+    ("Vitamix E310 Explorian Blender","Vitamix","Professional-grade blending — soups, smoothies, and nut butters in seconds.",6,899.00,None,4.8,True,None),
+    ("Russell Hobbs Heritage Kettle 1.7L Black","Russell Hobbs","Rapid boil technology — boils one cup in 45 seconds.",6,89.00,None,4.5,True,None),
+    ("Smeg 50s Style 4-Slice Toaster Cream","Smeg","Retro design, six browning settings, extra-wide slots for thick bread.",6,399.00,None,4.6,True,None),
+    ("Le Creuset Signature Casserole 24cm Volcanic","Le Creuset","Enamelled cast iron — even heat distribution, lifetime guarantee.",6,699.00,None,4.9,True,None),
+    ("Zwilling Pro Chef Knife 20cm","Zwilling","Precision-forged from single piece of steel. The kitchen workhorse.",6,299.00,None,4.8,True,None),
+    ("OXO Good Grips Non-Stick Pro Skillet 30cm","OXO","Textured surface for better searing, German Whitford non-stick coating.",6,149.00,None,4.7,True,None),
+    ("Tupperware Modular Mates Set 5 Pcs","Tupperware","Airtight pantry storage containers — keeps grains and spices fresh.",6,99.00,None,4.6,True,None),
+    ("Persil Automatic Washing Liquid 3L","Henkel","Powerful stain removal in cold water. Formulated for Gulf hard water.",6,38.00,None,4.6,True,45.00),
+    ("Comfort Blue Sky Fabric Conditioner 3L","Unilever","Long-lasting fragrance, softens fabrics, and reduces ironing time.",6,22.00,None,4.5,True,None),
+    ("Fairy Original Washing Up Liquid 1L","P&G","Powerful grease-cutting formula — the UK's No.1 washing up liquid.",6,8.50,None,4.7,True,None),
+    ("Dyson V12 Detect Slim Cordless Vacuum","Dyson","Laser reveals microscopic dust. 60-minute runtime, LCD screen.",6,2299.00,None,4.8,True,2599.00),
+    ("Philips HR2157 Hand Blender 700W","Philips","Stainless steel shaft, 21-speed settings, splash control bell.",6,149.00,None,4.6,True,None),
+    ("Lysol Disinfectant Spray Crisp Linen 450g","Reckitt","Kills 99.9% of viruses and bacteria on hard and soft surfaces.",6,22.00,None,4.6,True,None),
+    ("Febreze Fabric Refresher Extra Strength 500ml","P&G","Eliminates deep-set odours from fabrics — sofas, curtains, carpets.",6,14.00,None,4.5,True,None),
+    ("Yankee Candle Clean Cotton Large Jar 623g","Yankee Candle","Classic clean, linen-fresh fragrance. 110-150 hours burn time.",6,89.00,None,4.7,True,None),
+    ("Miracle-Gro All Purpose Plant Food 2kg","Scotts","Feeds plants instantly — for flowers, vegetables, and trees.",6,28.00,None,4.5,True,None),
+    ("IKEA SOCKER Plant Pot Set 3 Pcs White","IKEA","Simple terracotta pots with saucers — ideal for small indoor plants.",6,25.00,None,4.4,True,None),
+    # ── Toys & Kids (7) ──────────────────────────────────────────────────────
+    ("LEGO City Police Station 60316","LEGO","668 pieces, multiple minifigures, detailed police station build. Ages 6+.",7,199.00,None,4.8,True,None),
+    ("LEGO Duplo Classic Brick Box 10913","LEGO","80 DUPLO bricks in bright colours — open-ended creative play for toddlers.",7,119.00,None,4.8,True,None),
+    ("LEGO Creator 3-in-1 Cute Dog 31137","LEGO","Builds into a dog, cat, or rabbit — 3 models from one set. Ages 6+.",7,69.00,None,4.7,True,None),
+    ("Marvel Spider-Man 30cm Titan Hero Figure","Hasbro","Large-scale articulated action figure with web-shooting accessory.",7,69.00,None,4.6,True,None),
+    ("Barbie Dreamhouse 3-Story Dollhouse","Mattel","70+ accessories, pool with slide, working elevator. The ultimate Barbie home.",7,599.00,None,4.8,True,None),
+    ("Frozen II Elsa Fashion Doll with Dress","Mattel","Elsa doll in her iconic ice-blue dress from Frozen II.",7,69.00,None,4.7,True,None),
+    ("Monopoly Classic Board Game","Hasbro","The world's most beloved property trading game — the classic edition.",7,75.00,None,4.6,True,None),
+    ("Catan Base Board Game","Catan Studio","Strategic settlement-building game for 3-4 players. Ages 10+.",7,89.00,None,4.8,True,None),
+    ("Scrabble Original Classic Word Game","Mattel","The timeless word game — 100 premium tiles, rotating board.",7,69.00,None,4.6,True,None),
+    ("1000-Piece Jigsaw Puzzle Doha Skyline","Ravensburger","Striking Doha skyline puzzle — 1000 pieces for teens and adults.",7,55.00,None,4.5,True,None),
+    ("Fisher-Price Brilliant Basics Baby Gym","Mattel","Colourful activity gym with hanging toys — encourages early motor skills.",7,95.00,None,4.7,True,None),
+    ("Pampers Baby-Dry Diapers Size 3 70 Pieces","P&G","Extra-large pack of Pampers — up to 12 hours dryness for babies 4-9kg.",7,70.00,None,4.8,True,None),
+    ("Huggies Ultra Comfort Diapers Size 5 44 Pieces","Kimberly-Clark","Comfortable fit with DryTouch lining — ideal for active babies.",7,65.00,None,4.7,True,None),
+    ("Similac Gold Stage 2 Baby Formula 900g","Abbott","Follow-on formula for babies 6-12 months. HMO prebiotics.",7,175.00,None,4.7,True,None),
+    ("Aptamil Gold+ Stage 1 Infant Formula 900g","Nutricia","Expert-level nutrition with DHA and ARA — supports brain development.",7,195.00,None,4.7,True,None),
+    ("Nerf Elite 2.0 Blaster Commander","Hasbro","8-dart rotating drum, foldable stock, tactical rail. Accuracy and power.",7,75.00,None,4.7,True,None),
+    ("Razor A2 Kick Scooter Red","Razor","Lightweight aluminium scooter, rear fender brake, folding T-bar. Ages 5+.",7,149.00,None,4.6,True,None),
+    ("Playmobil City Life School 71328","Playmobil","Detailed school set with 3 figures, classroom, and outdoor area. Ages 4+.",7,149.00,None,4.7,True,None),
+    ("Melissa & Doug Wooden Puzzle Set 6 Pack","Melissa & Doug","Six chunky wooden puzzles — animals, shapes, and numbers for toddlers.",7,65.00,None,4.7,True,None),
+    ("VTech Baby Musical Learning Walker","VTech","Interactive walking toy with music, lights, and learning activities.",7,89.00,None,4.6,True,None),
+    # ── Sports & Outdoors (8) ─────────────────────────────────────────────────
+    ("Adidas Al Rihla Pro FIFA Quality Football","Adidas","Official match ball of the FIFA World Cup Qatar 2022. Size 5.",8,199.00,None,4.9,True,None),
+    ("Nike Premier League Strike Football","Nike","Durable match ball with high-visibility graphics. Size 5.",8,99.00,None,4.6,True,None),
+    ("Spalding NBA Official Game Basketball Size 7","Spalding","Full-grain leather, deep channel design — the ball of the NBA.",8,299.00,None,4.7,True,None),
+    ("Brooks Ghost 15 Men's Running Shoes","Brooks","Plush cushioning, balanced ride — Qatar runners' top choice.",8,549.00,None,4.8,True,None),
+    ("Garmin Forerunner 265 GPS Running Watch","Garmin","AMOLED display, advanced training metrics, 13-day battery life.",8,1299.00,None,4.8,True,None),
+    ("Optimum Nutrition Gold Standard Whey 2.27kg","Optimum Nutrition","24g protein per serving, low fat and carbs. 5g BCAAs, 4g glutamine.",8,199.00,None,4.8,True,219.00),
+    ("BSN Syntha-6 Protein Powder Chocolate 2.27kg","BSN","Multi-functional protein matrix — great taste, sustained release.",8,189.00,None,4.6,True,None),
+    ("Quest Protein Bars Chocolate Chip Cookie 12 Pack","Quest Nutrition","21g protein, 1g sugar, 150 calories — Qatar's favourite protein bar.",8,89.00,None,4.7,True,None),
+    ("Manduka PRO Yoga Mat 6mm Black","Manduka","Dense, non-slip lifetime-guarantee yoga mat — loved by Qatar's yoga community.",8,399.00,None,4.8,True,None),
+    ("Speedo Futura Classic Swim Goggles","Speedo","Anti-fog, UV protection, comfortable rubber seal — ideal for Doha's pools.",8,45.00,None,4.6,True,None),
+    ("Wilson US Open Tennis Balls 3 Pack","Wilson","Official ball of the US Open — consistent bounce, durable felt.",8,22.00,None,4.6,True,None),
+    ("TRX All-in-One Suspension Training System","TRX","Full-body workout with a single anchor point — used by Qatar's personal trainers.",8,349.00,None,4.7,True,None),
+    ("Bowflex SelectTech 552 Adjustable Dumbbell","Bowflex","Replaces 15 pairs of dumbbells — 2.5kg to 24kg in one dumbbell.",8,1299.00,None,4.7,True,None),
+    ("Gatorade Sports Drink Orange 600ml","PepsiCo","Electrolyte sports drink — fuels performance in Qatar's extreme heat.",8,6.50,None,4.5,True,None),
+    ("Clif Bar Energy Bar Chocolate Brownie 12 Pack","Clif","Organic oats, 9g protein — sustained energy for training sessions.",8,79.00,None,4.6,True,None),
+    ("Cressi Clio Mask & Finn Snorkel Set","Cressi","Crystal-clear lens, Italian-made silicone seal — for Qatar's sea activities.",8,89.00,None,4.6,True,None),
+    ("Compression Running Socks Calf High 3 Pack","2XU","Graduated compression for improved circulation and faster recovery.",8,45.00,None,4.5,True,None),
+    ("MSR Hubba Hubba NX 2-Person Tent","MSR","Ultra-light 1.72kg, freestanding, fully seam-taped — for Qatar camping.",8,1199.00,None,4.8,True,None),
+    # ── Pets (9) ──────────────────────────────────────────────────────────────
+    ("Royal Canin Persian Adult Dry Cat Food 2kg","Royal Canin","Specifically shaped kibble for Persian cats' flat face and jaw structure.",9,119.00,None,4.8,True,None),
+    ("Hill's Science Diet Adult Indoor Cat Food 3.6kg","Hill's","Clinically proven nutrition — reduces hairballs and maintains lean muscle.",9,145.00,None,4.7,True,None),
+    ("Sheba Perfect Portions Tuna & Salmon 24 Pack","Mars Petcare","Single-serve premium wet cat food — no preservatives, no artificial flavours.",9,85.00,None,4.8,True,None),
+    ("Temptations Classic Chicken Cat Treats 85g","Mars Petcare","Crunchy outside, soft inside. Cats go crazy for these in Qatar.",9,15.00,None,4.7,True,None),
+    ("Catit Pixi Smart Automatic Feeder","Catit","WiFi-connected smart feeder — schedule meals from your phone.",9,199.00,None,4.6,True,None),
+    ("PetSafe ScoopFree Automatic Litter Box","PetSafe","Self-cleaning crystal litter box — removes waste automatically.",9,599.00,None,4.7,True,None),
+    ("Hill's Science Diet Large Breed Dry Dog Food 15kg","Hill's","Natural ingredients with vitamins and minerals for large breed dogs.",9,285.00,None,4.7,True,None),
+    ("Purina Pro Plan Sensitive Salmon Dog Food 14kg","Nestle","Salmon-based formula for dogs with food sensitivities.",9,265.00,None,4.7,True,None),
+    ("Dentastix Daily Oral Care Treats Large 28 Pack","Mars Petcare","Reduces tartar build-up by up to 80%. Vets recommend daily use.",9,55.00,None,4.7,True,None),
+    ("KONG Extreme Dog Toy Large Black","Kong","Ultra-durable black KONG for power chewers — stuffable with treats.",9,75.00,None,4.8,True,None),
+    ("Ruffwear Front Range Padded Dog Harness","Ruffwear","Padded chest and belly panel — distributes pressure for active dogs.",9,189.00,None,4.8,True,None),
+    ("Furminator deShedding Tool Long Hair Medium","Furminator","Reduces shedding by up to 90% — popular with dog owners in Qatar.",9,95.00,None,4.7,True,None),
+    ("Tetra AquaArt Aquarium Starter Set 60L","Tetra","Complete aquarium kit with filter, heater, and LED lighting.",9,299.00,None,4.6,True,None),
+    ("API Freshwater Master Test Kit","API","800 tests — monitors ammonia, nitrite, nitrate, and pH in fish tanks.",9,65.00,None,4.7,True,None),
+    ("Kaytee Forti-Diet Hamster & Gerbil Food 1kg","Kaytee","Complete nutrition with seeds, grains, and fortified pellets.",9,25.00,None,4.5,True,None),
+    # ── Market (10) ───────────────────────────────────────────────────────────
+    ("Pilot G2 Retractable Gel Pens Black 10 Pack","Pilot","Smooth-writing retractable gel pens — the office staple across Qatar.",10,18.00,None,4.7,True,None),
+    ("Stabilo Boss Highlighters Assorted 8 Pack","Stabilo","Vivid fluorescent ink, chisel tip, won't bleed through most paper.",10,22.00,None,4.7,True,None),
+    ("Sharpie Permanent Markers Assorted 12 Pack","Sharpie","Permanent marks on virtually any surface. Fast-drying, fade-resistant.",10,28.00,None,4.6,True,None),
+    ("Moleskine Classic Ruled Notebook A5","Moleskine","192 pages, acid-free paper, bookmark ribbon. The writer's notebook.",10,45.00,None,4.7,True,None),
+    ("Leuchtturm1917 Bullet Journal A5 Dotted","Leuchtturm1917","240 numbered pages, dotted grid, pocket, and ink-proof paper.",10,55.00,None,4.8,True,None),
+    ("Arteza Watercolor Pencils 48 Pack","Arteza","Professional-grade pencils — vibrant, water-soluble, and blendable.",10,65.00,None,4.6,True,None),
+    ("Faber-Castell 9000 Graphite Pencils 12 Pack","Faber-Castell","The world's most trusted pencil — B to H grades, break-resistant.",10,25.00,None,4.8,True,None),
+    ("Bic Cristal Ballpoint Pens Black 10 Pack","Bic","The world's most sold pen — smooth ink flow, durable tungsten ball.",10,9.00,None,4.5,True,None),
+    ("Philips LED Classic Bulb E27 8W 3 Pack","Philips","Equivalent to 60W, 806 lumen warm white LED bulbs.",10,18.00,None,4.6,True,None),
+    ("Osram LED Star Bulb GU10 5W 3 Pack","Osram","Downlight replacement — 350 lumen, 2700K warm white, 15,000 hours.",10,16.00,None,4.5,True,None),
+    ("Johnson & Johnson First Aid Kit 140 Pieces","J&J","Comprehensive first aid kit — bandages, gauze, antiseptic, and more.",10,55.00,None,4.6,True,None),
+    ("Elastoplast Assorted Fabric Plasters 100 Pack","Beiersdorf","Flexible fabric plasters that move with your skin. Water-resistant.",10,18.00,None,4.5,True,None),
+    ("Domestos Multipurpose Thick Bleach 750ml","Unilever","Kills 99.9% of germs including viruses. Works in 1 minute.",10,7.50,None,4.5,True,None),
+    ("Fairy Original Dish Soap Lemon 1L","P&G","Powerful grease removal even in cold water — long-lasting formula.",10,8.50,None,4.6,True,None),
+    ("Method All-Purpose Cleaner Pink Grapefruit 828ml","Method","Plant-powered formula, 99% naturally derived ingredients.",10,18.00,None,4.5,True,None),
+    ("3M Command Large Damage-Free Hanging Strips 12 Pack","3M","Hang without nails — holds up to 3.6kg, removes cleanly.",10,22.00,None,4.6,True,None),
+    ("Velcro Brand Sticky Back Tape 2m Roll","Velcro","Self-adhesive hook and loop tape — strong, reusable, repositionable.",10,12.00,None,4.4,True,None),
+    ("Energizer Lithium AA Batteries 8 Pack","Energizer","33% lighter than alkaline, 9x power in extreme temperatures.",10,32.00,None,4.7,True,None),
+    ("Duracell Procell AA Batteries 20 Pack","Duracell","Professional-grade alkaline batteries — reliable power for office devices.",10,45.00,None,4.6,True,None),
+    ("Nobo Classic Steel Magnetic Whiteboard 60x90cm","Nobo","Steel surface for magnets, smooth writing and easy erasing.",10,155.00,None,4.6,True,None),
+]
 
-def main():
-    out_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "deploy","gcloud","db","02-seed-data.sql"
-    )
-    print(f"Target: {TARGET} products | Output: {out_path}", file=sys.stderr)
 
-    seen = set()
-    final = []
-
-    # 1. Curated rows first
-    for row in CURATED:
-        key = row[1].lower().strip()
-        if key in seen: continue
-        seen.add(key)
-        final.append(row)
-    print(f"Curated: {len(final)}", file=sys.stderr)
-
-    # 2. Pull from OpenFoodFacts
-    searches = [
-        {"tagtype_0":"countries","tag_contains_0":"contains","tag_0":"Qatar",
-         "tagtype_1":"misc","tag_contains_1":"contains","tag_1":"en:complete-photo"},
-        {"tagtype_0":"countries","tag_contains_0":"contains","tag_0":"Saudi Arabia",
-         "tagtype_1":"misc","tag_contains_1":"contains","tag_1":"en:complete-photo"},
-        {"tagtype_0":"countries","tag_contains_0":"contains","tag_0":"United Arab Emirates",
-         "tagtype_1":"misc","tag_contains_1":"contains","tag_1":"en:complete-photo"},
-        {"tagtype_0":"countries","tag_contains_0":"contains","tag_0":"Egypt",
-         "tagtype_1":"misc","tag_contains_1":"contains","tag_1":"en:complete-photo"},
-        {"tagtype_0":"countries","tag_contains_0":"contains","tag_0":"Jordan",
-         "tagtype_1":"misc","tag_contains_1":"contains","tag_1":"en:complete-photo"},
-        {"tagtype_0":"countries","tag_contains_0":"contains","tag_0":"Lebanon",
-         "tagtype_1":"misc","tag_contains_1":"contains","tag_1":"en:complete-photo"},
-        {"tagtype_0":"countries","tag_contains_0":"contains","tag_0":"Kuwait",
-         "tagtype_1":"misc","tag_contains_1":"contains","tag_1":"en:complete-photo"},
-        {"tagtype_0":"countries","tag_contains_0":"contains","tag_0":"Bahrain",
-         "tagtype_1":"misc","tag_contains_1":"contains","tag_1":"en:complete-photo"},
-    ]
-
-    pool = []
-    for params in searches:
-        if len(final)+len(pool) >= TARGET+200: break
-        need = TARGET - len(final) - len(pool)
-        print(f"OFN: {params.get('tag_0','?')} (need ~{need} more)...", file=sys.stderr)
-        batch = collect(params, max_p=min(need+100, 500))
-        pool.extend(batch)
-        print(f"  got {len(batch)}, pool={len(pool)}", file=sys.stderr)
-
-    idx = 1
-    for p in pool:
-        if len(final) >= TARGET: break
-        key = p["name"].lower().strip()
-        if key in seen: continue
-        if not p["img"].startswith("http"): continue
-        seen.add(key)
-        cat_id = guess_category(p["name"], p["brands"], p["tags"])
-        price  = guess_price(cat_id, p["name"])
-        cmp    = round(price*1.15, 2) if idx%5==0 else None
-        rating = round(3.5+(int(hashlib.md5(p["name"].encode()).hexdigest()[:4],16)%15)/10,1)
-        in_stock = (idx%20!=0)
-        pid = f"snu-{idx:05d}"
-        final.append((pid, p["name"], p["brands"], None, cat_id, price, p["img"],
-                      rating, in_stock, cmp))
-        idx += 1
-
-    print(f"Final: {len(final)} products", file=sys.stderr)
-
-    # 3. Write SQL
-    header = """\
+HEADER = """\
 --
 -- PostgreSQL database dump
 --
 
-\\restrict cznfCrh011aXx2WgnIIH7HXTdkggUATtzGQRUYrgN4XKaYgXVbIM2o4ZTTOZM9o
+\\restrict {key}
 
 -- Dumped from database version 16.14 (Debian 16.14-1.pgdg13+1)
 -- Dumped by pg_dump version 16.14 (Debian 16.14-1.pgdg13+1)
@@ -383,24 +568,24 @@ INSERT INTO public.categories VALUES (10, 'Market', 'market');
 -- Data for Name: cities; Type: TABLE DATA; Schema: public; Owner: snoonu
 --
 
-INSERT INTO public.cities VALUES (1, 'Doha', 25.285400, 51.531000, '{doha}');
-INSERT INTO public.cities VALUES (2, 'Al Rayyan', 25.291900, 51.424400, '{rayyan}');
-INSERT INTO public.cities VALUES (3, 'Al Wakrah', 25.165900, 51.603800, '{wakrah}');
-INSERT INTO public.cities VALUES (4, 'Umm Salal', 25.415100, 51.397300, '{"umm salal"}');
-INSERT INTO public.cities VALUES (5, 'Al Khor', 25.680400, 51.498900, '{"al khor",khor}');
-INSERT INTO public.cities VALUES (6, 'Al Daayen', 25.519700, 51.492600, '{daayen}');
-INSERT INTO public.cities VALUES (7, 'Al Shamal', 26.116700, 51.216700, '{"madinat shamal",shamal}');
-INSERT INTO public.cities VALUES (8, 'Al Shahaniya', 25.370500, 51.196900, '{shahaniya}');
+INSERT INTO public.cities VALUES (1, 'Doha', 25.285400, 51.531000, '{{doha}}');
+INSERT INTO public.cities VALUES (2, 'Al Rayyan', 25.291900, 51.424400, '{{rayyan}}');
+INSERT INTO public.cities VALUES (3, 'Al Wakrah', 25.165900, 51.603800, '{{wakrah}}');
+INSERT INTO public.cities VALUES (4, 'Umm Salal', 25.415100, 51.397300, '{{"umm salal"}}');
+INSERT INTO public.cities VALUES (5, 'Al Khor', 25.680400, 51.498900, '{{"al khor",khor}}');
+INSERT INTO public.cities VALUES (6, 'Al Daayen', 25.519700, 51.492600, '{{daayen}}');
+INSERT INTO public.cities VALUES (7, 'Al Shamal', 26.116700, 51.216700, '{{"madinat shamal",shamal}}');
+INSERT INTO public.cities VALUES (8, 'Al Shahaniya', 25.370500, 51.196900, '{{shahaniya}}');
 
 
 --
 -- Data for Name: products; Type: TABLE DATA; Schema: public; Owner: snoonu
--- Real Qatar/GCC products from OpenFoodFacts (openfoodfacts.org, CC-BY-SA)
--- plus curated Qatari brands (Baladna, Mazzraty, Rayyan, Doha Dates, etc.).
+-- Real Qatar/GCC products — curated Qatari brands (Baladna, Mazzraty, Rayyan, Doha Dates, etc.)
+-- plus international brands widely available in Qatar.
 --
+""".format(key=RESTRICT_KEY)
 
-"""
-    footer = """
+FOOTER = """
 
 --
 -- Name: categories_id_seq; Type: SEQUENCE SET; Schema: public; Owner: snoonu
@@ -420,26 +605,86 @@ SELECT pg_catalog.setval('public.cities_id_seq', 8, true);
 -- PostgreSQL database dump complete
 --
 
-\\unrestrict cznfCrh011aXx2WgnIIH7HXTdkggUATtzGQRUYrgN4XKaYgXVbIM2o4ZTTOZM9o
-"""
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(header)
-        for row in final:
-            pid,name,brand,desc,cat_id,price,img,rating,in_stock,compare_at = row
-            def s(v):
-                if v is None: return "NULL"
-                return "'"+str(v).replace("'","''")+"'"
-            f.write(
-                f"INSERT INTO public.products VALUES ("
-                f"{s(pid)},{s(name)},{s(brand)},{s(desc)},"
-                f"{cat_id},{price:.2f},'QAR',"
-                f"{f'{compare_at:.2f}' if compare_at else 'NULL'},"
-                f"{'true' if in_stock else 'false'},"
-                f"{'\'high\'' if in_stock else '\'out_of_stock\''},"
-                f"{s(img)},NULL,{rating},NULL,'{CREATED_AT}');\n"
-            )
-        f.write(footer)
-    print("Done.", file=sys.stderr)
+\\unrestrict {key}""".format(key=RESTRICT_KEY)
 
-if __name__=="__main__":
+
+def esc(s):
+    if s is None:
+        return "NULL"
+    return "'" + str(s).replace("'", "''") + "'"
+
+
+def resolve_img(key_or_url):
+    if not key_or_url:
+        return "NULL"
+    if key_or_url.startswith("http"):
+        return esc(key_or_url)
+    return esc(IMG[key_or_url]) if key_or_url in IMG else "NULL"
+
+
+def curated_sql(row):
+    pid, name, brand, desc, cat_id, price, img, rating, in_stock, compare_at = row
+    stock = "high" if in_stock else "low"
+    bool_s = "true" if in_stock else "false"
+    img_s = resolve_img(img)
+    cmp_s = f"{compare_at:.2f}" if compare_at else "NULL"
+    return (
+        f"INSERT INTO public.products VALUES ({esc(pid)},{esc(name)},{esc(brand)},"
+        f"{esc(desc)},{cat_id},{price:.2f},'QAR',{cmp_s},{bool_s},{esc(stock)},"
+        f"{img_s},NULL,{rating},NULL,'{CREATED_AT}');"
+    )
+
+
+def extra_sql(idx, row):
+    name, brand, desc, cat_id, price, img, rating, in_stock, compare_at = row
+    pid = f"snu-x{idx:04d}"
+    stock = "high" if in_stock else "low"
+    bool_s = "true" if in_stock else "false"
+    img_s = resolve_img(img)
+    cmp_s = f"{compare_at:.2f}" if compare_at else "NULL"
+    return (
+        f"INSERT INTO public.products VALUES ({esc(pid)},{esc(name)},{esc(brand)},"
+        f"{esc(desc)},{cat_id},{price:.2f},'QAR',{cmp_s},{bool_s},{esc(stock)},"
+        f"{img_s},NULL,{rating},NULL,'{CREATED_AT}');"
+    )
+
+
+def main():
+    out_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "deploy", "gcloud", "db", "02-seed-data.sql"
+    )
+
+    lines = [HEADER]
+
+    seen_names = set()
+    count = 0
+
+    for row in CURATED:
+        name_key = row[1].lower().strip()
+        if name_key in seen_names:
+            continue
+        seen_names.add(name_key)
+        lines.append(curated_sql(row))
+        count += 1
+
+    idx = 1
+    for row in EXTRA:
+        name_key = row[0].lower().strip()
+        if name_key in seen_names:
+            continue
+        seen_names.add(name_key)
+        lines.append(extra_sql(idx, row))
+        idx += 1
+        count += 1
+
+    lines.append(FOOTER)
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    print(f"Done: {count} products → {out_path}", file=sys.stderr)
+
+
+if __name__ == "__main__":
     main()
