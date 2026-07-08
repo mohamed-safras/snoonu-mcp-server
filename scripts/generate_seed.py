@@ -1,12 +1,12 @@
 """
-Generates deploy/gcloud/db/02-seed-data.sql with 500+ real Qatar/GCC products.
-Self-contained: no external API calls.
+Generates deploy/gcloud/db/02-seed-data.sql with real Qatar/GCC products.
 
 Usage:
-    python scripts/generate_seed.py
-    python scripts/generate_seed.py --count 500
+    python scripts/generate_seed.py            # verify all image URLs (default)
+    python scripts/generate_seed.py --no-verify  # skip verification (fast, CI mode)
 """
-import os, sys
+import os, sys, urllib.request, urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 CREATED_AT = "2026-06-26 15:55:09.901789+00"
 RESTRICT_KEY = "cznfCrh011aXx2WgnIIH7HXTdkggUATtzGQRUYrgN4XKaYgXVbIM2o4ZTTOZM9o"
@@ -38,36 +38,36 @@ IMG = {
     "tuc":        "https://images.openfoodfacts.org/images/products/541/004/100/1204/1.400.jpg",
     "wasa":       "https://images.openfoodfacts.org/images/products/730/040/048/1595/1.400.jpg",
     "nesquik":    "https://images.openfoodfacts.org/images/products/844/529/013/3403/1.400.jpg",
-    # Electronics — Wikimedia Commons Special:FilePath (redirect-stable, never stale)
-    "ps5":        "https://commons.wikimedia.org/wiki/Special:FilePath/PlayStation-5-wDualSense-Consoles.jpg?width=400",
-    "switch_oled":"https://commons.wikimedia.org/wiki/Special:FilePath/Nintendo-Switch-OLED-wJoy-Con.jpg?width=400",
-    "iphone15pro":"https://commons.wikimedia.org/wiki/Special:FilePath/IPhone_15_Pro_Models.jpg?width=400",
-    "macair_m2":  "https://commons.wikimedia.org/wiki/Special:FilePath/2022_MacBook_Air_M2.jpg?width=400",
-    "macpro_m3":  "https://commons.wikimedia.org/wiki/Special:FilePath/Apple_MacBook_Pro_M3_2023.jpg?width=400",
-    "apple_watch":"https://commons.wikimedia.org/wiki/Special:FilePath/Apple_Watch_Series_9.jpg?width=400",
-    "ipad_air":   "https://commons.wikimedia.org/wiki/Special:FilePath/IPad_Air_5th_generation.jpg?width=400",
-    "galaxy_s24": "https://commons.wikimedia.org/wiki/Special:FilePath/Samsung_Galaxy_S24_Ultra_front.jpg?width=400",
-    "galaxy_w6":  "https://commons.wikimedia.org/wiki/Special:FilePath/Samsung_Galaxy_Watch_6_Classic.jpg?width=400",
-    "dji_mini4":  "https://commons.wikimedia.org/wiki/Special:FilePath/DJI_Mini_4_Pro_drone.jpg?width=400",
-    "xbox_s":     "https://commons.wikimedia.org/wiki/Special:FilePath/Xbox-Series-S-Console-Set.jpg?width=400",
-    "canon_r50":  "https://commons.wikimedia.org/wiki/Special:FilePath/Canon_EOS_R50.jpg?width=400",
-    "lg_monitor": "https://commons.wikimedia.org/wiki/Special:FilePath/LG_27GP850-B_monitor.jpg?width=400",
-    "razer_mouse":"https://commons.wikimedia.org/wiki/Special:FilePath/Razer_DeathAdder_V3.jpg?width=400",
-    "logitech_wc":"https://commons.wikimedia.org/wiki/Special:FilePath/Logitech_Brio_4K_webcam.jpg?width=400",
-    # New category images — same raw-number format
-    "lavazza":    "https://images.openfoodfacts.org/images/products/800/007/001/1985/1.400.jpg",
-    "illy":       "https://images.openfoodfacts.org/images/products/800/375/385/0115/1.400.jpg",
-    "nespresso":  "https://images.openfoodfacts.org/images/products/763/003/940/0135/1.400.jpg",
-    "starbucks":  "https://images.openfoodfacts.org/images/products/762/111/490/5050/1.400.jpg",
-    "pampers_p":  "https://images.openfoodfacts.org/images/products/401/540/043/7055/1.400.jpg",
-    "huggies_p":  "https://images.openfoodfacts.org/images/products/003/600/041/3350/1.400.jpg",
-    "johnsons":   "https://images.openfoodfacts.org/images/products/357/466/143/3424/1.400.jpg",
-    "aptamil":    "https://images.openfoodfacts.org/images/products/800/030/019/3306/1.400.jpg",
-    "cerelac":    "https://images.openfoodfacts.org/images/products/628/102/302/4415/1.400.jpg",
-    "bepanthen":  "https://images.openfoodfacts.org/images/products/401/060/203/2015/1.400.jpg",
-    "dettol_ant": "https://images.openfoodfacts.org/images/products/628/064/603/8018/1.400.jpg",
-    "gaviscon":   "https://images.openfoodfacts.org/images/products/500/049/412/7965/1.400.jpg",
-    "rennie":     "https://images.openfoodfacts.org/images/products/400/399/041/8006/1.400.jpg",
+    # Electronics — Wikimedia Commons Special:FilePath (verifier confirms exact filenames)
+    "ps5":        "https://commons.wikimedia.org/wiki/Special:FilePath/PlayStation_5_and_DualSense.jpg?width=400",
+    "switch_oled":"https://commons.wikimedia.org/wiki/Special:FilePath/Nintendo_Switch_OLED_Model.jpg?width=400",
+    "iphone15pro":"https://commons.wikimedia.org/wiki/Special:FilePath/Apple_iPhone_15_Pro_Max.jpg?width=400",
+    "macair_m2":  "https://commons.wikimedia.org/wiki/Special:FilePath/Apple_MacBook_Air_M2_2022.jpg?width=400",
+    "macpro_m3":  "https://commons.wikimedia.org/wiki/Special:FilePath/Apple_MacBook_Pro_14_M3_2023.jpg?width=400",
+    "apple_watch":"https://commons.wikimedia.org/wiki/Special:FilePath/Apple_Watch_Series_9_aluminium.jpg?width=400",
+    "ipad_air":   "https://commons.wikimedia.org/wiki/Special:FilePath/Apple_iPad_Air_5th_generation.jpg?width=400",
+    "galaxy_s24": "https://commons.wikimedia.org/wiki/Special:FilePath/Samsung_Galaxy_S24_Ultra.jpg?width=400",
+    "galaxy_w6":  "https://commons.wikimedia.org/wiki/Special:FilePath/Samsung_Galaxy_Watch6_Classic.jpg?width=400",
+    "dji_mini4":  "https://commons.wikimedia.org/wiki/Special:FilePath/DJI_Mini_4_Pro.jpg?width=400",
+    "xbox_s":     "https://commons.wikimedia.org/wiki/Special:FilePath/Xbox_Series_S.jpg?width=400",
+    "canon_r50":  "https://commons.wikimedia.org/wiki/Special:FilePath/Canon_EOS_R50_camera.jpg?width=400",
+    "lg_monitor": "https://commons.wikimedia.org/wiki/Special:FilePath/LG_27GP850.jpg?width=400",
+    "razer_mouse":"https://commons.wikimedia.org/wiki/Special:FilePath/Razer_DeathAdder_V3_Pro.jpg?width=400",
+    "logitech_wc":"https://commons.wikimedia.org/wiki/Special:FilePath/Logitech_BRIO_4K_webcam.jpg?width=400",
+    # New category images — raw image 1, alternate barcodes where originals 404'd
+    "lavazza":    "https://images.openfoodfacts.org/images/products/800/007/001/1367/1.400.jpg",
+    "illy":       "https://images.openfoodfacts.org/images/products/800/375/300/0528/1.400.jpg",
+    "nespresso":  "https://images.openfoodfacts.org/images/products/763/003/900/0166/1.400.jpg",
+    "starbucks":  "https://images.openfoodfacts.org/images/products/762/111/490/0067/1.400.jpg",
+    "pampers_p":  "https://images.openfoodfacts.org/images/products/400/897/600/0128/1.400.jpg",
+    "huggies_p":  "https://images.openfoodfacts.org/images/products/502/905/354/3635/1.400.jpg",
+    "johnsons":   "https://images.openfoodfacts.org/images/products/038/137/001/7893/1.400.jpg",
+    "aptamil":    "https://images.openfoodfacts.org/images/products/400/897/600/0111/1.400.jpg",
+    "cerelac":    "https://images.openfoodfacts.org/images/products/629/100/352/1014/1.400.jpg",
+    "bepanthen":  "https://images.openfoodfacts.org/images/products/401/039/668/8341/1.400.jpg",
+    "dettol_ant": "https://images.openfoodfacts.org/images/products/628/100/692/0398/1.400.jpg",
+    "gaviscon":   "https://images.openfoodfacts.org/images/products/500/016/792/1145/1.400.jpg",
+    "rennie":     "https://images.openfoodfacts.org/images/products/500/016/707/1046/1.400.jpg",
 }
 
 # ── Curated products (id, name, brand, desc, cat_id, price, img_key_or_url, rating, in_stock, compare_at) ──
@@ -870,18 +870,58 @@ SELECT pg_catalog.setval('public.cities_id_seq', 8, true);
 \\unrestrict {key}""".format(key=RESTRICT_KEY)
 
 
+def _head_ok(url: str) -> bool:
+    """Return True if url responds 200 to a HEAD request."""
+    try:
+        req = urllib.request.Request(url, method="HEAD",
+                                     headers={"User-Agent": "snoonu-seed-verify/1.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def verify_images(urls: set[str]) -> set[str]:
+    """Return the subset of urls that are reachable (HTTP 200)."""
+    good: set[str] = set()
+    bad: list[str] = []
+    print(f"  Verifying {len(urls)} image URLs…", file=sys.stderr)
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        futures = {pool.submit(_head_ok, u): u for u in urls}
+        for fut in as_completed(futures):
+            url = futures[fut]
+            if fut.result():
+                good.add(url)
+            else:
+                bad.append(url)
+    if bad:
+        print(f"  ✗ {len(bad)} dead URLs removed:", file=sys.stderr)
+        for u in sorted(bad):
+            print(f"      {u}", file=sys.stderr)
+    print(f"  ✓ {len(good)} URLs verified OK", file=sys.stderr)
+    return good
+
+
 def esc(s):
     if s is None:
         return "NULL"
     return "'" + str(s).replace("'", "''") + "'"
 
 
+# populated by main() after verification
+_GOOD_URLS: set[str] = set()
+_SKIP_VERIFY = False
+
+
 def resolve_img(key_or_url):
     if not key_or_url:
         return "NULL"
-    if key_or_url.startswith("http"):
-        return esc(key_or_url)
-    return esc(IMG[key_or_url]) if key_or_url in IMG else "NULL"
+    url = IMG.get(key_or_url) if not key_or_url.startswith("http") else key_or_url
+    if not url:
+        return "NULL"
+    if _SKIP_VERIFY or url in _GOOD_URLS:
+        return esc(url)
+    return "NULL"  # failed verification
 
 
 def curated_sql(row):
@@ -911,41 +951,69 @@ def extra_sql(idx, row):
     )
 
 
+def collect_candidate_urls() -> set[str]:
+    """Gather every image URL referenced by IMG keys, CURATED rows, and EXTRA rows."""
+    candidate_urls: set[str] = set()
+    for image_url in IMG.values():
+        if image_url and image_url.startswith("http"):
+            candidate_urls.add(image_url)
+    for curated_row in CURATED:
+        image_field = curated_row[6]
+        if image_field and image_field.startswith("http"):
+            candidate_urls.add(image_field)
+        elif image_field and image_field in IMG and IMG[image_field]:
+            candidate_urls.add(IMG[image_field])
+    for extra_row in EXTRA:
+        image_field = extra_row[5]
+        if image_field and image_field.startswith("http"):
+            candidate_urls.add(image_field)
+        elif image_field and image_field in IMG and IMG[image_field]:
+            candidate_urls.add(IMG[image_field])
+    return candidate_urls
+
+
 def main():
-    out_path = os.path.join(
+    global _GOOD_URLS, _SKIP_VERIFY
+    _SKIP_VERIFY = "--no-verify" in sys.argv
+
+    output_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "deploy", "gcloud", "db", "02-seed-data.sql"
     )
 
-    lines = [HEADER]
+    if not _SKIP_VERIFY:
+        _GOOD_URLS = verify_images(collect_candidate_urls())
+    else:
+        print("  Skipping image verification (--no-verify)", file=sys.stderr)
 
-    seen_names = set()
-    count = 0
+    sql_lines = [HEADER]
+    seen_names: set[str] = set()
+    product_count = 0
 
-    for row in CURATED:
-        name_key = row[1].lower().strip()
+    for curated_row in CURATED:
+        name_key = curated_row[1].lower().strip()
         if name_key in seen_names:
             continue
         seen_names.add(name_key)
-        lines.append(curated_sql(row))
-        count += 1
+        sql_lines.append(curated_sql(curated_row))
+        product_count += 1
 
-    idx = 1
-    for row in EXTRA:
-        name_key = row[0].lower().strip()
+    extra_index = 1
+    for extra_row in EXTRA:
+        name_key = extra_row[0].lower().strip()
         if name_key in seen_names:
             continue
         seen_names.add(name_key)
-        lines.append(extra_sql(idx, row))
-        idx += 1
-        count += 1
+        sql_lines.append(extra_sql(extra_index, extra_row))
+        extra_index += 1
+        product_count += 1
 
-    lines.append(FOOTER)
+    sql_lines.append(FOOTER)
 
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+    with open(output_path, "w", encoding="utf-8") as output_file:
+        output_file.write("\n".join(sql_lines))
 
-    print(f"Done: {count} products → {out_path}", file=sys.stderr)
+    print(f"Done: {product_count} products → {output_path}", file=sys.stderr)
 
 
 if __name__ == "__main__":
