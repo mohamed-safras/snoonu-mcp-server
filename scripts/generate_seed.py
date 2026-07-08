@@ -20,7 +20,7 @@ IMG = {
     "rani":       "https://images.openfoodfacts.org/images/products/628/176/420/6028/front_en.5.400.jpg",
     "almarai":    "https://images.openfoodfacts.org/images/products/628/176/400/0038/front_en.12.400.jpg",
     "pringles":   "https://images.openfoodfacts.org/images/products/038/000/845/5963/front_en.15.400.jpg",
-    "kitkat":     "https://images.openfoodfacts.org/images/products/400/009/007/5050/front_en.131.400.jpg",
+    "kitkat":     "https://images.openfoodfacts.org/images/products/400/009/007/5050/front_en.1.400.jpg",
     "cadbury":    "https://images.openfoodfacts.org/images/products/762/221/044/9283/front_en.605.400.jpg",
     "nutella":    "https://images.openfoodfacts.org/images/products/000/008/017/6800/front_en.273.400.jpg",
     "heinz":      "https://images.openfoodfacts.org/images/products/000/001/700/7033/front_en.280.400.jpg",
