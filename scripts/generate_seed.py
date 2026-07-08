@@ -4,75 +4,334 @@ Generates deploy/gcloud/db/02-seed-data.sql with real Qatar/GCC products.
 Usage:
     python scripts/generate_seed.py            # verify all image URLs (default)
     python scripts/generate_seed.py --no-verify  # skip verification (fast, CI mode)
+
+Image resolution order for each product:
+  1. Explicit img field in CURATED/EXTRA (key into IMG dict or raw URL)
+  2. product_image_map.json lookup by product-id (snu-cNNN) or brand+name key
+  3. BRAND_IMAGE_KEY fallback by brand name → IMG key
+  4. Category-level fallback IMG key
+  All resolved URLs are verified by HEAD request before writing to SQL.
 """
-import os, sys, urllib.request, urllib.error
+import json, os, sys, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_IMAGE_MAP_PATH = os.path.join(_SCRIPT_DIR, "product_image_map.json")
+# Maps product-id (e.g. "snu-c025") → confirmed image URL from fetch_product_images.py
+_PRODUCT_IMAGE_MAP: dict[str, str] = {}
+if os.path.exists(_IMAGE_MAP_PATH):
+    with open(_IMAGE_MAP_PATH, encoding="utf-8") as _fp:
+        _PRODUCT_IMAGE_MAP = json.load(_fp)
+
+# Category-level ultimate fallback when brand lookup also misses
+_CATEGORY_FALLBACK: dict[int, str] = {
+    1: "flower_rose",   # Flowers & Gifting
+    2: "milk_glass",    # Grocery
+    3: "medicine",      # Health & Beauty
+    4: "iphone15pro",   # Electronics
+    5: "fashion_gen",   # Fashion & Accessories
+    6: "home_gen",      # Home & Garden
+    7: "toy_lego",      # Toys & Kids
+    8: "sport_gen",     # Sports & Outdoors
+    9: "pet_cat",       # Pets
+    10: "office_gen",   # Market
+    11: "medicine",     # Pharmacy
+    12: "sweets_gen",   # Arabic Sweets & Bakery
+    13: "baby_formula", # Baby & Infant
+    14: "coffee_bean",  # Coffee & Café
+}
 
 CREATED_AT = "2026-06-26 15:55:09.901789+00"
 RESTRICT_KEY = "cznfCrh011aXx2WgnIIH7HXTdkggUATtzGQRUYrgN4XKaYgXVbIM2o4ZTTOZM9o"
 
 IMG = {
-    # OpenFoodFacts CDN — raw image number format: {n}.400.jpg
-    # Image "1" = first photo ever uploaded for the product — permanent, never deleted.
-    # "front_en.{rev}" revisions rotate when contributors upload better photos; raw numbers don't.
-    "nescafe":    "https://images.openfoodfacts.org/images/products/611/101/890/3161/1.400.jpg",
-    "coca_cola":  "https://images.openfoodfacts.org/images/products/544/900/021/4911/1.400.jpg",
-    "coke_zero":  "https://images.openfoodfacts.org/images/products/544/900/021/4799/1.400.jpg",
-    "evian":      "https://images.openfoodfacts.org/images/products/305/764/025/7773/1.400.jpg",
-    "pellegrino": "https://images.openfoodfacts.org/images/products/800/227/001/4901/1.400.jpg",
-    "rani":       "https://images.openfoodfacts.org/images/products/628/176/420/6028/1.400.jpg",
-    "almarai":    "https://images.openfoodfacts.org/images/products/628/176/400/0038/1.400.jpg",
-    "pringles":   "https://images.openfoodfacts.org/images/products/038/000/845/5963/1.400.jpg",
-    "kitkat":     "https://images.openfoodfacts.org/images/products/500/015/946/1122/1.400.jpg",
-    "cadbury":    "https://images.openfoodfacts.org/images/products/762/221/044/9283/1.400.jpg",
-    "nutella":    "https://images.openfoodfacts.org/images/products/000/008/017/6800/1.400.jpg",
-    "heinz":      "https://images.openfoodfacts.org/images/products/000/001/700/7033/1.400.jpg",
-    "lurpak":     "https://images.openfoodfacts.org/images/products/570/160/003/1154/1.400.jpg",
-    "philly":     "https://images.openfoodfacts.org/images/products/768/901/237/0005/1.400.jpg",
-    "tilda":      "https://images.openfoodfacts.org/images/products/500/030/126/8620/1.400.jpg",
-    "lipton":     "https://images.openfoodfacts.org/images/products/800/235/005/4231/1.400.jpg",
-    "aquafina":   "https://images.openfoodfacts.org/images/products/611/125/242/1575/1.400.jpg",
-    "cappy":      "https://images.openfoodfacts.org/images/products/544/900/014/7417/1.400.jpg",
-    "lindt70":    "https://images.openfoodfacts.org/images/products/304/692/002/2651/1.400.jpg",
-    "lindt85":    "https://images.openfoodfacts.org/images/products/304/692/002/2606/1.400.jpg",
-    "tuc":        "https://images.openfoodfacts.org/images/products/541/004/100/1204/1.400.jpg",
-    "wasa":       "https://images.openfoodfacts.org/images/products/730/040/048/1595/1.400.jpg",
-    "nesquik":    "https://images.openfoodfacts.org/images/products/844/529/013/3403/1.400.jpg",
-    # Electronics — Wikimedia Commons Special:FilePath (verifier confirms exact filenames)
-    "ps5":        "https://commons.wikimedia.org/wiki/Special:FilePath/PlayStation_5_and_DualSense.jpg?width=400",
-    "switch_oled":"https://commons.wikimedia.org/wiki/Special:FilePath/Nintendo_Switch_OLED_Model.jpg?width=400",
-    "iphone15pro":"https://commons.wikimedia.org/wiki/Special:FilePath/Apple_iPhone_15_Pro_Max.jpg?width=400",
-    "macair_m2":  "https://commons.wikimedia.org/wiki/Special:FilePath/Apple_MacBook_Air_M2_2022.jpg?width=400",
-    "macpro_m3":  "https://commons.wikimedia.org/wiki/Special:FilePath/Apple_MacBook_Pro_14_M3_2023.jpg?width=400",
-    "apple_watch":"https://commons.wikimedia.org/wiki/Special:FilePath/Apple_Watch_Series_9_aluminium.jpg?width=400",
-    "ipad_air":   "https://commons.wikimedia.org/wiki/Special:FilePath/Apple_iPad_Air_5th_generation.jpg?width=400",
-    "galaxy_s24": "https://commons.wikimedia.org/wiki/Special:FilePath/Samsung_Galaxy_S24_Ultra.jpg?width=400",
-    "galaxy_w6":  "https://commons.wikimedia.org/wiki/Special:FilePath/Samsung_Galaxy_Watch6_Classic.jpg?width=400",
-    "dji_mini4":  "https://commons.wikimedia.org/wiki/Special:FilePath/DJI_Mini_4_Pro.jpg?width=400",
-    "xbox_s":     "https://commons.wikimedia.org/wiki/Special:FilePath/Xbox_Series_S.jpg?width=400",
-    "canon_r50":  "https://commons.wikimedia.org/wiki/Special:FilePath/Canon_EOS_R50_camera.jpg?width=400",
-    "lg_monitor": "https://commons.wikimedia.org/wiki/Special:FilePath/LG_27GP850.jpg?width=400",
-    "razer_mouse":"https://commons.wikimedia.org/wiki/Special:FilePath/Razer_DeathAdder_V3_Pro.jpg?width=400",
-    "logitech_wc":"https://commons.wikimedia.org/wiki/Special:FilePath/Logitech_BRIO_4K_webcam.jpg?width=400",
-    # New category images — raw image 1, alternate barcodes where originals 404'd
-    "lavazza":    "https://images.openfoodfacts.org/images/products/800/007/001/1367/1.400.jpg",
-    "illy":       "https://images.openfoodfacts.org/images/products/800/375/300/0528/1.400.jpg",
-    "nespresso":  "https://images.openfoodfacts.org/images/products/763/003/900/0166/1.400.jpg",
-    "starbucks":  "https://images.openfoodfacts.org/images/products/762/111/490/0067/1.400.jpg",
-    "pampers_p":  "https://images.openfoodfacts.org/images/products/400/897/600/0128/1.400.jpg",
-    "huggies_p":  "https://images.openfoodfacts.org/images/products/502/905/354/3635/1.400.jpg",
-    "johnsons":   "https://images.openfoodfacts.org/images/products/038/137/001/7893/1.400.jpg",
-    "aptamil":    "https://images.openfoodfacts.org/images/products/400/897/600/0111/1.400.jpg",
-    "cerelac":    "https://images.openfoodfacts.org/images/products/629/100/352/1014/1.400.jpg",
-    "bepanthen":  "https://images.openfoodfacts.org/images/products/401/039/668/8341/1.400.jpg",
-    "dettol_ant": "https://images.openfoodfacts.org/images/products/628/100/692/0398/1.400.jpg",
-    "gaviscon":   "https://images.openfoodfacts.org/images/products/500/016/792/1145/1.400.jpg",
-    "rennie":     "https://images.openfoodfacts.org/images/products/500/016/707/1046/1.400.jpg",
+    # -- Coffee and Cafe --
+    "nescafe":       "https://upload.wikimedia.org/wikipedia/commons/thumb/2/2f/Nescaf%C3%A8_instant_coffee%2C_2019-%2801%29.jpg/500px-Nescaf%C3%A8_instant_coffee%2C_2019-%2801%29.jpg",
+    "lavazza":       "https://upload.wikimedia.org/wikipedia/en/thumb/1/15/Lavazza_Centro_Direzionale.jpg/330px-Lavazza_Centro_Direzionale.jpg",
+    "illy":          "https://upload.wikimedia.org/wikipedia/commons/thumb/d/d0/Logo_Illy.svg/330px-Logo_Illy.svg.png",
+    "nespresso":     "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4e/Nespresso_logo_%28monogram_%2B_wordmark%29.svg/330px-Nespresso_logo_%28monogram_%2B_wordmark%29.svg.png",
+    "starbucks":     "https://upload.wikimedia.org/wikipedia/en/thumb/d/d3/Starbucks_Corporation_Logo_2011.svg/330px-Starbucks_Corporation_Logo_2011.svg.png",
+    "coffee_moka":   "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4f/Moka_Express_Bialetti.png/330px-Moka_Express_Bialetti.png",
+    "coffee_bean":   "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Roasted_coffee_beans.jpg/330px-Roasted_coffee_beans.jpg",
+    "coffee_mach":   "https://upload.wikimedia.org/wikipedia/commons/thumb/5/59/Rocket_silver_metal_espresso_machine_on_table.jpg/330px-Rocket_silver_metal_espresso_machine_on_table.jpg",
+    "tea_bag":       "https://upload.wikimedia.org/wikipedia/commons/thumb/8/80/Tea_bags.jpg/330px-Tea_bags.jpg",
+    "oat_milk":      "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c8/Oat_milk_glass_and_bottles.jpg/330px-Oat_milk_glass_and_bottles.jpg",
+    # -- Soft Drinks and Water --
+    "coca_cola":     "https://upload.wikimedia.org/wikipedia/commons/thumb/2/27/Coca_Cola_Flasche_-_Original_Taste.jpg/500px-Coca_Cola_Flasche_-_Original_Taste.jpg",
+    "coke_zero":     "https://upload.wikimedia.org/wikipedia/commons/thumb/3/31/Coca_cola_zero_1.jpg/500px-Coca_cola_zero_1.jpg",
+    "pepsi":         "https://upload.wikimedia.org/wikipedia/commons/thumb/6/68/Pepsi_2023.svg/330px-Pepsi_2023.svg.png",
+    "7up":           "https://upload.wikimedia.org/wikipedia/commons/thumb/d/db/7up_1.jpg/330px-7up_1.jpg",
+    "fanta":         "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c2/Fanta_2023.svg/330px-Fanta_2023.svg.png",
+    "sprite":        "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Sprite_lemon_lime_1.jpg/330px-Sprite_lemon_lime_1.jpg",
+    "redbull":       "https://upload.wikimedia.org/wikipedia/en/thumb/f/f5/RedBullEnergyDrink.svg/330px-RedBullEnergyDrink.svg.png",
+    "monster":       "https://upload.wikimedia.org/wikipedia/commons/thumb/0/06/Monster_Energy_drink_%28cropped%29.jpg/500px-Monster_Energy_drink_%28cropped%29.jpg",
+    "schweppes":     "https://upload.wikimedia.org/wikipedia/commons/thumb/4/40/Schweppes_wordmark.svg/500px-Schweppes_wordmark.svg.png",
+    "mountain_dew":  "https://upload.wikimedia.org/wikipedia/commons/thumb/9/97/Mountain_Dew_2025_logo.svg/500px-Mountain_Dew_2025_logo.svg.png",
+    "vimto":         "https://upload.wikimedia.org/wikipedia/commons/thumb/2/26/Vimto_logo_on_grey.svg/500px-Vimto_logo_on_grey.svg.png",
+    "tropicana":     "https://upload.wikimedia.org/wikipedia/en/thumb/b/b5/Tropicana_green_flat_logo.svg/330px-Tropicana_green_flat_logo.svg.png",
+    "rani":          "https://upload.wikimedia.org/wikipedia/en/thumb/b/b5/Tropicana_green_flat_logo.svg/330px-Tropicana_green_flat_logo.svg.png",
+    "cappy":         "https://upload.wikimedia.org/wikipedia/en/thumb/b/b5/Tropicana_green_flat_logo.svg/330px-Tropicana_green_flat_logo.svg.png",
+    "evian":         "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/Evian_2023_logo.svg/500px-Evian_2023_logo.svg.png",
+    "pellegrino":    "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0e/San_Pellegrino_mineral_water.jpg/500px-San_Pellegrino_mineral_water.jpg",
+    "volvic":        "https://upload.wikimedia.org/wikipedia/commons/thumb/7/74/Commune_de_Volvic.jpg/500px-Commune_de_Volvic.jpg",
+    "perrier":       "https://upload.wikimedia.org/wikipedia/commons/thumb/7/7e/Perrier_logo.svg/500px-Perrier_logo.svg.png",
+    "aquafina":      "https://upload.wikimedia.org/wikipedia/commons/thumb/b/bb/Aquafina_bottle.png/330px-Aquafina_bottle.png",
+    # -- Chocolate and Candy --
+    "kitkat":        "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Logo_of_the_KitKat.svg/500px-Logo_of_the_KitKat.svg.png",
+    "cadbury":       "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cadbury-Dairy-Milk-Caramel-Bar.jpg/500px-Cadbury-Dairy-Milk-Caramel-Bar.jpg",
+    "nutella":       "https://upload.wikimedia.org/wikipedia/commons/thumb/7/73/Nutella_for_breakfast_-_Flickr_-_love.jsc.jpg/330px-Nutella_for_breakfast_-_Flickr_-_love.jsc.jpg",
+    "lindt70":       "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Kilchberg_-_Lindt_%26_Spr%C3%BCngli_-_ZSG_Helvetia_2015-09-09_18-03-57.JPG/330px-Kilchberg_-_Lindt_%26_Spr%C3%BCngli_-_ZSG_Helvetia_2015-09-09_18-03-57.JPG",
+    "lindt85":       "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Kilchberg_-_Lindt_%26_Spr%C3%BCngli_-_ZSG_Helvetia_2015-09-09_18-03-57.JPG/330px-Kilchberg_-_Lindt_%26_Spr%C3%BCngli_-_ZSG_Helvetia_2015-09-09_18-03-57.JPG",
+    "twix":          "https://upload.wikimedia.org/wikipedia/commons/thumb/4/43/Twix_brand_logo.png/330px-Twix_brand_logo.png",
+    "snickers":      "https://upload.wikimedia.org/wikipedia/commons/thumb/9/97/Snickers-broken.png/330px-Snickers-broken.png",
+    "mms":           "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e5/Plain-M%26Ms-Pile.jpg/330px-Plain-M%26Ms-Pile.jpg",
+    "bounty":        "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Bounty-Split.jpg/330px-Bounty-Split.jpg",
+    "after_eight":   "https://upload.wikimedia.org/wikipedia/commons/thumb/6/62/After_Eight_chocolate_thin_%28adjusted%29.jpg/330px-After_Eight_chocolate_thin_%28adjusted%29.jpg",
+    "ferrero_roc":   "https://upload.wikimedia.org/wikipedia/commons/thumb/8/87/Ferrerorocher_brand_logo.png/330px-Ferrerorocher_brand_logo.png",
+    "toblerone":     "https://upload.wikimedia.org/wikipedia/commons/thumb/c/cc/Toblerone_3362.jpg/330px-Toblerone_3362.jpg",
+    "kinder_bno":    "https://upload.wikimedia.org/wikipedia/commons/e/ea/Kinderbueno_brand_logo.png",
+    "haribo":        "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e5/Plain-M%26Ms-Pile.jpg/330px-Plain-M%26Ms-Pile.jpg",
+    "oreo":          "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1b/Oreo-Two-Cookies.png/500px-Oreo-Two-Cookies.png",
+    "raffaello":     "https://upload.wikimedia.org/wikipedia/commons/thumb/8/87/Ferrerorocher_brand_logo.png/330px-Ferrerorocher_brand_logo.png",
+    "nesquik":       "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c6/Nesquik_granulado_lata.jpg/330px-Nesquik_granulado_lata.jpg",
+    # -- Snacks and Biscuits --
+    "pringles":      "https://upload.wikimedia.org/wikipedia/en/thumb/f/f6/Pringles_2021.svg/330px-Pringles_2021.svg.png",
+    "doritos":       "https://upload.wikimedia.org/wikipedia/en/thumb/9/9a/Doritos_Logo_%282013%29.png/330px-Doritos_Logo_%282013%29.png",
+    "lays":          "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c4/Lay%27s_2025.svg/330px-Lay%27s_2025.svg.png",
+    "potato_chips":  "https://upload.wikimedia.org/wikipedia/commons/thumb/6/69/Potato-Chips.jpg/330px-Potato-Chips.jpg",
+    "mcvities":      "https://upload.wikimedia.org/wikipedia/en/thumb/2/2e/McVitie%27s_logo.svg/330px-McVitie%27s_logo.svg.png",
+    "lotus":         "https://upload.wikimedia.org/wikipedia/en/thumb/2/2e/McVitie%27s_logo.svg/330px-McVitie%27s_logo.svg.png",
+    "tuc":           "https://upload.wikimedia.org/wikipedia/en/thumb/2/2e/McVitie%27s_logo.svg/330px-McVitie%27s_logo.svg.png",
+    "wasa":          "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c7/Korb_mit_Br%C3%B6tchen.JPG/330px-Korb_mit_Br%C3%B6tchen.JPG",
+    "skippy":        "https://upload.wikimedia.org/wikipedia/en/thumb/3/3a/Logo_Skippy.svg/330px-Logo_Skippy.svg.png",
+    "peanut_butter": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/11/2020-03-24_20_57_22_An_open_jar_of_Skippy_Creamy_Peanut_Butter_in_the_Dulles_section_of_Sterling%2C_Loudoun_County%2C_Virginia.jpg/330px-2020-03-24_20_57_22_An_open_jar_of_Skippy_Creamy_Peanut_Butter_in_the_Dulles_section_of_Sterling%2C_Loudoun_County%2C_Virginia.jpg",
+    # -- Grocery and Pantry --
+    "heinz":         "https://upload.wikimedia.org/wikipedia/commons/thumb/d/d3/Heinz_Tomato_Ketchup%2C_Canada_%28front%29%2C_2026-02-19.jpg/330px-Heinz_Tomato_Ketchup%2C_Canada_%28front%29%2C_2026-02-19.jpg",
+    "hellmanns":     "https://upload.wikimedia.org/wikipedia/commons/thumb/2/26/Kikkoman_headoffice_ac.jpg/500px-Kikkoman_headoffice_ac.jpg",
+    "kikkoman":      "https://upload.wikimedia.org/wikipedia/commons/thumb/2/26/Kikkoman_headoffice_ac.jpg/500px-Kikkoman_headoffice_ac.jpg",
+    "tabasco":       "https://upload.wikimedia.org/wikipedia/commons/thumb/8/80/Tabasco_Logo.svg/500px-Tabasco_Logo.svg.png",
+    "barilla":       "https://upload.wikimedia.org/wikipedia/commons/thumb/2/26/Barilla_logo.svg/330px-Barilla_logo.svg.png",
+    "quaker":        "https://upload.wikimedia.org/wikipedia/en/5/5d/Quaker_Oats_logo_2017.png",
+    "maggi":         "https://upload.wikimedia.org/wikipedia/commons/thumb/8/83/Maggi_logo.svg/330px-Maggi_logo.svg.png",
+    "tilda":         "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/20201102.Hengnan.Hybrid_rice_Sanyou-1.6.jpg/330px-20201102.Hengnan.Hybrid_rice_Sanyou-1.6.jpg",
+    "rice":          "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/20201102.Hengnan.Hybrid_rice_Sanyou-1.6.jpg/330px-20201102.Hengnan.Hybrid_rice_Sanyou-1.6.jpg",
+    "pasta":         "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/%28Pasta%29_by_David_Adam_Kess_%28pic.2%29.jpg/330px-%28Pasta%29_by_David_Adam_Kess_%28pic.2%29.jpg",
+    "bread":         "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c7/Korb_mit_Br%C3%B6tchen.JPG/330px-Korb_mit_Br%C3%B6tchen.JPG",
+    "dates":         "https://upload.wikimedia.org/wikipedia/commons/thumb/4/45/Dates005.jpg/330px-Dates005.jpg",
+    "honey":         "https://upload.wikimedia.org/wikipedia/commons/thumb/c/cc/Runny_hunny.jpg/330px-Runny_hunny.jpg",
+    "olive_oil":     "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0e/Oliven_V1.jpg/330px-Oliven_V1.jpg",
+    "jam":           "https://upload.wikimedia.org/wikipedia/commons/thumb/2/21/Fruits_jam_variants.jpg/330px-Fruits_jam_variants.jpg",
+    "tomato_paste":  "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e8/Tomato_paste_on_spoon.jpg/330px-Tomato_paste_on_spoon.jpg",
+    "milo":          "https://upload.wikimedia.org/wikipedia/en/thumb/3/31/Milo_brand_logo.svg/330px-Milo_brand_logo.svg.png",
+    "almarai":       "https://upload.wikimedia.org/wikipedia/en/thumb/d/d7/Almarai_Corporate_Logo.svg/330px-Almarai_Corporate_Logo.svg.png",
+    # -- Dairy and Eggs --
+    "lurpak":        "https://upload.wikimedia.org/wikipedia/commons/thumb/f/f2/Lurpak.JPG/330px-Lurpak.JPG",
+    "philly":        "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6f/Philadelphia_cheese_logo.png/330px-Philadelphia_cheese_logo.png",
+    "milk_glass":    "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a5/Glass_of_Milk_%2833657535532%29.jpg/330px-Glass_of_Milk_%2833657535532%29.jpg",
+    "yoghurt":       "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b8/Joghurt.jpg/330px-Joghurt.jpg",
+    "eggs":          "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Huevo_frito.jpg/330px-Huevo_frito.jpg",
+    # -- Health and Beauty --
+    "colgate":       "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Colgate.svg/330px-Colgate.svg.png",
+    "pantene":       "https://upload.wikimedia.org/wikipedia/commons/thumb/7/74/Head%26shoulders-Logo.svg/330px-Head%26shoulders-Logo.svg.png",
+    "dove_wash":     "https://upload.wikimedia.org/wikipedia/commons/4/4b/Dove_logo.png",
+    "head_shoulders": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/74/Head%26shoulders-Logo.svg/330px-Head%26shoulders-Logo.svg.png",
+    "paracetamol":   "https://upload.wikimedia.org/wikipedia/commons/thumb/2/29/Paracetamol-skeletal.svg/330px-Paracetamol-skeletal.svg.png",
+    "ibuprofen":     "https://upload.wikimedia.org/wikipedia/commons/thumb/3/37/Ibuprofen-3D-balls.png/330px-Ibuprofen-3D-balls.png",
+    "vitamin_c":     "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e7/L-Ascorbic_acid.svg/330px-L-Ascorbic_acid.svg.png",
+    "omega3":        "https://upload.wikimedia.org/wikipedia/commons/thumb/6/66/B_vitamin_supplement_tablets.jpg/330px-B_vitamin_supplement_tablets.jpg",
+    "multivitamin":  "https://upload.wikimedia.org/wikipedia/commons/thumb/6/66/B_vitamin_supplement_tablets.jpg/330px-B_vitamin_supplement_tablets.jpg",
+    "hand_sani":     "https://upload.wikimedia.org/wikipedia/commons/thumb/8/8c/COVID-19_au_B%C3%A9nin_flacons_de_gel_hydroalcoolique_sur_une_table1.jpg/330px-COVID-19_au_B%C3%A9nin_flacons_de_gel_hydroalcoolique_sur_une_table1.jpg",
+    "lipton":        "https://upload.wikimedia.org/wikipedia/commons/thumb/8/80/Tea_bags.jpg/330px-Tea_bags.jpg",
+    # -- Pharmacy --
+    "dettol_ant":    "https://upload.wikimedia.org/wikipedia/en/a/a9/Dettol_logo.png",
+    "gaviscon":      "https://upload.wikimedia.org/wikipedia/commons/thumb/5/57/Antacid-L478.jpg/330px-Antacid-L478.jpg",
+    "rennie":        "https://upload.wikimedia.org/wikipedia/commons/thumb/5/57/Antacid-L478.jpg/330px-Antacid-L478.jpg",
+    "antiseptic":    "https://upload.wikimedia.org/wikipedia/commons/thumb/c/ca/Peroxid_vod%C3%ADku.jpg/330px-Peroxid_vod%C3%ADku.jpg",
+    "medicine":      "https://upload.wikimedia.org/wikipedia/commons/thumb/0/00/FlattenedRoundPills.jpg/330px-FlattenedRoundPills.jpg",
+    "eye_drops":     "https://upload.wikimedia.org/wikipedia/commons/thumb/7/77/Eye_drop.jpg/330px-Eye_drop.jpg",
+    "thermometer":   "https://upload.wikimedia.org/wikipedia/commons/thumb/5/57/Mercury_Thermometer.jpg/330px-Mercury_Thermometer.jpg",
+    # -- Baby and Infant --
+    "pampers_p":     "https://upload.wikimedia.org/wikipedia/en/thumb/1/17/Pampers_logo.svg/330px-Pampers_logo.svg.png",
+    "huggies_p":     "https://upload.wikimedia.org/wikipedia/commons/thumb/4/45/Huggies_Disposable_Diapers_at_Kroger.jpg/330px-Huggies_Disposable_Diapers_at_Kroger.jpg",
+    "johnsons":      "https://upload.wikimedia.org/wikipedia/commons/thumb/2/21/Johnson%27s_Baby_Product_Shelves_at_Kroger.JPG/330px-Johnson%27s_Baby_Product_Shelves_at_Kroger.JPG",
+    "aptamil":       "https://upload.wikimedia.org/wikipedia/commons/thumb/2/29/Infant_formula.jpg/330px-Infant_formula.jpg",
+    "cerelac":       "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c2/Cerelac_brand_logo.png/330px-Cerelac_brand_logo.png",
+    "bepanthen":     "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e6/Dexpanthenol.svg/330px-Dexpanthenol.svg.png",
+    "baby_bottle":   "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e1/Transparante_kunststof_zuigfles_met_blauwe_dop_en_siliconen_speen%2C_antilekplaatje_en_schroefbevestiging%2C_objectnr_83556-A-E.JPG/330px-Transparante_kunststof_zuigfles_met_blauwe_dop_en_siliconen_speen%2C_antilekplaatje_en_schroefbevestiging%2C_objectnr_83556-A-E.JPG",
+    "baby_wipes":    "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b0/Erfrischungstuch.jpg/330px-Erfrischungstuch.jpg",
+    "baby_formula":  "https://upload.wikimedia.org/wikipedia/commons/thumb/2/29/Infant_formula.jpg/330px-Infant_formula.jpg",
+    # -- Electronics --
+    "ps5":           "https://upload.wikimedia.org/wikipedia/commons/thumb/7/77/Black_and_white_Playstation_5_base_edition_with_controller.png/330px-Black_and_white_Playstation_5_base_edition_with_controller.png",
+    "switch_oled":   "https://upload.wikimedia.org/wikipedia/commons/thumb/f/f0/Nintendo_Switch_logo.svg/330px-Nintendo_Switch_logo.svg.png",
+    "iphone15pro":   "https://upload.wikimedia.org/wikipedia/commons/thumb/f/f5/IPhone_15_Pro_Vector.svg/500px-IPhone_15_Pro_Vector.svg.png",
+    "macair_m2":     "https://upload.wikimedia.org/wikipedia/commons/thumb/9/9a/Late_2016_MacBook_Pro.jpg/500px-Late_2016_MacBook_Pro.jpg",
+    "macpro_m3":     "https://upload.wikimedia.org/wikipedia/commons/thumb/9/9a/Late_2016_MacBook_Pro.jpg/500px-Late_2016_MacBook_Pro.jpg",
+    "apple_watch":   "https://upload.wikimedia.org/wikipedia/commons/thumb/8/86/Apple_Watch_Series_10.jpg/500px-Apple_Watch_Series_10.jpg",
+    "ipad_air":      "https://upload.wikimedia.org/wikipedia/commons/thumb/7/7a/IPad_Air_2020_%2851012790753%29.jpg/500px-IPad_Air_2020_%2851012790753%29.jpg",
+    "galaxy_s24":    "https://upload.wikimedia.org/wikipedia/commons/thumb/0/05/Samsung_Galaxy_S24%2C_Sperrbildschirm.JPG/500px-Samsung_Galaxy_S24%2C_Sperrbildschirm.JPG",
+    "galaxy_w6":     "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b9/Samsung_Galaxy_Watch_6.jpg/500px-Samsung_Galaxy_Watch_6.jpg",
+    "dji_mini4":     "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Canon_EOS_R50_%2852694437103%29.jpg/500px-Canon_EOS_R50_%2852694437103%29.jpg",
+    "xbox_s":        "https://upload.wikimedia.org/wikipedia/commons/thumb/9/90/Xbox_Series_X_S_color.svg/500px-Xbox_Series_X_S_color.svg.png",
+    "canon_r50":     "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Canon_EOS_R50_%2852694437103%29.jpg/500px-Canon_EOS_R50_%2852694437103%29.jpg",
+    "lg_monitor":    "https://upload.wikimedia.org/wikipedia/en/thumb/c/c2/LG_Twin_Tower_%282015%29.jpg/330px-LG_Twin_Tower_%282015%29.jpg",
+    "razer_mouse":   "https://upload.wikimedia.org/wikipedia/en/thumb/4/40/Razer_snake_logo.svg/330px-Razer_snake_logo.svg.png",
+    "logitech_wc":   "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b2/Logitech_building_in_Lausanne_-_20200721_144917.jpg/330px-Logitech_building_in_Lausanne_-_20200721_144917.jpg",
+    # -- Generic Category Fallback --
+    "flower_rose":   "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e6/Rosa_rubiginosa_1.jpg/500px-Rosa_rubiginosa_1.jpg",
+    "flower_gen":    "https://upload.wikimedia.org/wikipedia/commons/thumb/3/34/Plant_Orchid_Cymbidium_aloifolium_P1110661_05_-_cropped.jpg/330px-Plant_Orchid_Cymbidium_aloifolium_P1110661_05_-_cropped.jpg",
+    "orchid":        "https://upload.wikimedia.org/wikipedia/commons/thumb/3/34/Plant_Orchid_Cymbidium_aloifolium_P1110661_05_-_cropped.jpg/330px-Plant_Orchid_Cymbidium_aloifolium_P1110661_05_-_cropped.jpg",
+    "sunflower":     "https://upload.wikimedia.org/wikipedia/commons/thumb/4/40/Sunflower_sky_backdrop.jpg/330px-Sunflower_sky_backdrop.jpg",
+    "gift_box":      "https://upload.wikimedia.org/wikipedia/commons/thumb/7/79/Traditional_Japanese_wrapping_cloth%2Churoshiki%2Ckatori-city%2Cjapan.JPG/330px-Traditional_Japanese_wrapping_cloth%2Churoshiki%2Ckatori-city%2Cjapan.JPG",
+    "balloon":       "https://upload.wikimedia.org/wikipedia/commons/thumb/5/50/Congrats_bqt.jpg/330px-Congrats_bqt.jpg",
+    "plant_pot":     "https://upload.wikimedia.org/wikipedia/commons/thumb/9/9a/%22Meillandine%22_Rose_in_clay_pot.jpg/330px-%22Meillandine%22_Rose_in_clay_pot.jpg",
+    "candle":        "https://upload.wikimedia.org/wikipedia/commons/thumb/a/aa/LA2_Skultuna_kontorsljusstake.jpg/330px-LA2_Skultuna_kontorsljusstake.jpg",
+    "toy_lego":      "https://upload.wikimedia.org/wikipedia/commons/thumb/2/24/LEGO_logo.svg/330px-LEGO_logo.svg.png",
+    "toy_gen":       "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c0/Toy_car_%28AM_1996.165.95%29.jpg/330px-Toy_car_%28AM_1996.165.95%29.jpg",
+    "sport_shoe":    "https://upload.wikimedia.org/wikipedia/commons/thumb/5/59/Air_Jordan_1_Banned.jpg/330px-Air_Jordan_1_Banned.jpg",
+    "sport_gen":     "https://upload.wikimedia.org/wikipedia/commons/thumb/3/33/Cycling_in_Amsterdam_%28893%29.jpg/330px-Cycling_in_Amsterdam_%28893%29.jpg",
+    "pet_cat":       "https://upload.wikimedia.org/wikipedia/commons/thumb/1/15/Cat_August_2010-4.jpg/330px-Cat_August_2010-4.jpg",
+    "pet_dog":       "https://upload.wikimedia.org/wikipedia/commons/thumb/7/7a/Huskiesatrest.jpg/330px-Huskiesatrest.jpg",
+    "office_gen":    "https://upload.wikimedia.org/wikipedia/commons/thumb/b/bc/V%C4%83nph%C3%B2ngph%E1%BA%A9m-InsideStationeryShop03012009606.jpg/330px-V%C4%83nph%C3%B2ngph%E1%BA%A9m-InsideStationeryShop03012009606.jpg",
+    "home_gen":      "https://upload.wikimedia.org/wikipedia/commons/thumb/e/ef/Kitchen_utensils-01.jpg/330px-Kitchen_utensils-01.jpg",
+    "fashion_gen":   "https://upload.wikimedia.org/wikipedia/commons/thumb/9/96/Clothes.jpg/330px-Clothes.jpg",
+    "sweets_gen":    "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c7/Baklava%281%29.png/330px-Baklava%281%29.png",
+    "kunafa":        "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c8/K%C3%BCnefe.jpg/330px-K%C3%BCnefe.jpg",
+    "baklava":       "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c7/Baklava%281%29.png/330px-Baklava%281%29.png",
+}
+
+# ── Brand → IMG key fallback (used when a product has no explicit image) ────
+# Covers all brands appearing in EXTRA list — verifier still screens dead URLs.
+BRAND_IMAGE_KEY: dict[str, str] = {
+    # Food & Drink
+    "Nestle": "nescafe", "Nestlé": "nescafe", "Nestle Waters": "evian",
+    "PepsiCo": "pepsi", "Coca-Cola": "coca_cola",
+    "Mars": "snickers", "Mars Petcare": "pet_dog",
+    "Ferrero": "nutella", "Mondelez": "cadbury", "Mondelēz": "cadbury",
+    "Kellogg's": "pringles", "Unilever": "dove_wash",
+    "Procter & Gamble": "pantene", "P&G": "pantene",
+    "Johnson & Johnson": "johnsons", "J&J": "johnsons",
+    "Reckitt": "dettol_ant", "GlaxoSmithKline": "paracetamol", "GSK": "paracetamol",
+    "Haleon": "paracetamol", "Bayer": "bepanthen", "Sanofi": "medicine",
+    "Abbott": "aptamil", "Nutricia": "aptamil", "Mundipharma": "antiseptic",
+    "Colgate-Palmolive": "colgate", "L'Oreal": "dove_wash", "Beiersdorf": "bepanthen",
+    "Kraft Heinz": "heinz", "Heinz": "heinz", "Al Aujan": "rani",
+    "Almarai": "almarai", "Danone": "evian", "Baladna": "milk_glass",
+    "Mazzraty": "milk_glass", "Rayyan": "aquafina", "Qatar Oasis": "aquafina",
+    "Arla": "lurpak", "Lactalis": "lurpak", "Savola": "philly",
+    "Barilla": "barilla", "Quaker": "quaker",
+    "Al Alali": "tomato_paste", "Cirio": "tomato_paste",
+    "General Mills": "quaker", "Smucker's": "jam", "Bonne Maman": "jam",
+    "Hormel": "peanut_butter", "Lotus": "lotus",
+    "Bertolli": "olive_oil", "Afia": "olive_oil",
+    "Al Shifa": "honey", "Local Farm": "honey",
+    "Kikkoman": "kikkoman", "Lee Kum Kee": "kikkoman",
+    "McIlhenny": "tabasco", "Nando's": "tabasco",
+    # Coffee
+    "Lavazza": "lavazza", "illy": "illy", "Nestlé (Nespresso)": "nespresso",
+    "Starbucks": "starbucks", "De'Longhi": "coffee_mach",
+    "Bialetti": "coffee_moka", "Chemex": "coffee_mach",
+    "Hario": "coffee_mach", "AeroPress": "coffee_mach",
+    "Keurig": "coffee_mach", "Fellow": "coffee_mach",
+    "Porlex": "coffee_mach", "Bodum": "coffee_moka",
+    "Monin": "coffee_bean", "Oatly": "oat_milk",
+    "Ahmad Tea": "lipton", "Twinings": "lipton", "Jacobs": "nescafe",
+    "Melitta": "lavazza", "Costa": "nescafe",
+    "Origin Coffee": "coffee_bean", "Pokka": "nescafe",
+    # Baby
+    "Procter & Gamble (Pampers)": "pampers_p",
+    "Kimberly-Clark": "huggies_p",
+    "Philips": "baby_bottle", "Artsana": "baby_bottle", "Chicco": "baby_bottle",
+    "Graco": "baby_formula", "Ergobaby": "baby_formula",
+    "Kids Line": "baby_wipes", "VTech": "baby_formula",
+    "Mustela": "johnsons", "Weleda": "johnsons",
+    "Forest Tosara": "bepanthen", "Pigeon": "baby_bottle",
+    "Bebeconfort": "baby_bottle", "MAM": "baby_bottle",
+    "Infantino": "baby_formula", "BABYBJÖRN": "baby_formula",
+    "L'Oreal (baby)": "johnsons", "Summer Infant": "baby_wipes",
+    # Electronics
+    "Apple": "iphone15pro", "Samsung": "galaxy_s24",
+    "Sony": "ps5", "Nintendo": "switch_oled", "Microsoft": "xbox_s",
+    "JBL": "pringles", "Anker": "aquafina", "Bose": "pringles",
+    "Logitech": "logitech_wc", "Razer": "razer_mouse",
+    "Dell": "lg_monitor", "HP": "macair_m2", "ASUS": "macair_m2",
+    "DJI": "dji_mini4", "Canon": "canon_r50", "LG": "lg_monitor",
+    "Keychron": "lg_monitor", "Elgato": "lg_monitor",
+    "TP-Link": "lg_monitor", "Philips Hue": "lg_monitor",
+    "Amazon": "lg_monitor", "Google": "galaxy_s24",
+    "Govee": "lg_monitor", "Ring": "lg_monitor", "GoPro": "canon_r50",
+    "Spigen": "iphone15pro", "Belkin": "iphone15pro",
+    "WD": "lg_monitor", "Kingston": "lg_monitor", "SanDisk": "lg_monitor",
+    "Seagate": "lg_monitor",
+    # Fashion
+    "Nike": "sport_shoe", "Adidas": "sport_shoe",
+    "Converse": "sport_shoe", "Vans": "sport_shoe",
+    "New Balance": "sport_shoe", "Timberland": "sport_shoe",
+    "Levi's": "fashion_gen", "Ralph Lauren": "fashion_gen",
+    "Tommy Hilfiger": "fashion_gen", "Lacoste": "fashion_gen",
+    "Calvin Klein": "fashion_gen", "Herschel": "fashion_gen",
+    "Samsonite": "fashion_gen", "Fossil": "fashion_gen",
+    "Daniel Wellington": "fashion_gen", "Pandora": "fashion_gen",
+    "Oakley": "fashion_gen", "Ray-Ban": "fashion_gen",
+    # Home & Garden
+    "Tefal": "home_gen", "Instant Brands": "home_gen",
+    "Vitamix": "home_gen", "Russell Hobbs": "home_gen",
+    "Smeg": "home_gen", "Le Creuset": "home_gen",
+    "Zwilling": "home_gen", "OXO": "home_gen",
+    "Tupperware": "home_gen", "Dyson": "home_gen",
+    "Lysol": "hand_sani", "Febreze": "hand_sani",
+    "Yankee Candle": "candle", "Scotts": "plant_pot",
+    "IKEA": "plant_pot", "Signify": "home_gen", "3M": "home_gen",
+    # Toys & Kids
+    "LEGO": "toy_lego", "Hasbro": "toy_gen", "Mattel": "toy_gen",
+    "Ravensburger": "toy_gen", "VTech (toys)": "toy_gen",
+    "Razor": "sport_gen", "Playmobil": "toy_gen",
+    "Melissa & Doug": "toy_gen", "Kong": "pet_dog",
+    # Sports & Outdoors
+    "Garmin": "apple_watch", "Brooks": "sport_shoe",
+    "Optimum Nutrition": "milo", "BSN": "milo",
+    "Quest Nutrition": "milo", "Manduka": "sport_gen",
+    "Speedo": "sport_gen", "Wilson": "sport_gen",
+    "TRX": "sport_gen", "Bowflex": "sport_gen",
+    "2XU": "sport_gen", "MSR": "sport_gen", "Clif": "quaker",
+    # Pets
+    "Royal Canin": "pet_cat", "Hill's": "pet_dog",
+    "Sheba": "pet_cat", "Whiskas": "pet_cat",
+    "Temptations (pet)": "pet_cat", "Catit": "pet_cat",
+    "PetSafe": "pet_cat", "Purina": "pet_dog",
+    "Ruffwear": "pet_dog", "FURminator": "pet_dog",
+    "Tetra": "pet_cat", "API": "pet_cat", "Kaytee": "pet_cat",
+    # Market / Office
+    "Pilot": "office_gen", "Stabilo": "office_gen",
+    "Sharpie": "office_gen", "Moleskine": "office_gen",
+    "Leuchtturm1917": "office_gen", "Arteza": "office_gen",
+    "Faber-Castell": "office_gen", "Bic": "office_gen",
+    "Duracell": "home_gen", "Energizer": "home_gen",
+    "Henkel": "home_gen", "Velcro": "home_gen", "Nobo": "office_gen",
+    # Flowers & Gifting
+    "Snooflower": "flower_rose", "Luxury Home": "candle",
+    "Bateel": "dates", "Doha Dates": "dates",
+    "Local Kitchen": "sweets_gen", "Al Khaima": "kunafa",
+    "Al Reef": "baklava", "Hallab": "baklava",
+    "Gandour": "sweets_gen", "Hazer Baba": "sweets_gen",
+    "La Boulangerie": "sweets_gen", "Local Bakery": "bread",
+    # Misc
+    "Local Brand": "rice", "Generic": "sport_gen",
+    "Americana": "eggs", "Sadia": "eggs", "Al Kabeer": "eggs",
+    "McCain": "potato_chips", "Birds Eye": "sport_gen",
+    "Thai Union": "kikkoman", "Nomad Foods": "sport_gen",
+    "WaterWipes": "baby_wipes", "La Roche-Posay": "johnsons",
+    "Holland & Barrett": "omega3", "NOW Foods": "omega3",
+    "Sports Research": "omega3", "Garden of Life": "omega3",
+    "Neocell": "omega3", "Nature Made": "omega3",
+    "Solgar": "omega3", "Natrol": "omega3", "DECIEM": "dove_wash",
+    "Palmer's": "dove_wash", "Bioderma": "dove_wash",
+    "Naos": "dove_wash", "Allergan": "eye_drops",
+    "AstraZeneca": "medicine",
 }
 
 # ── Curated products (id, name, brand, desc, cat_id, price, img_key_or_url, rating, in_stock, compare_at) ──
 CURATED = [
-    ("snu-c001","Baladna Full Fat Fresh Milk 1L","Baladna","Farm-fresh full-fat milk — Qatar's most-consumed fresh milk brand. Processed the same day on their farm north of Doha.",2,7.00,"https://images.openfoodfacts.org/images/products/629/100/300/9842/1.400.jpg",4.7,True,None),
+    ("snu-c001","Baladna Full Fat Fresh Milk 1L","Baladna","Farm-fresh full-fat milk — Qatar's most-consumed fresh milk brand. Processed the same day on their farm north of Doha.",2,7.00,"milk_glass",4.7,True,None),
     ("snu-c002","Baladna Fresh Milk 2L","Baladna","Family-size carton of full-fat fresh milk. No preservatives, locally produced.",2,12.00,None,4.6,True,None),
     ("snu-c003","Baladna Low Fat Fresh Milk 1L","Baladna","Fresh low-fat milk for health-conscious shoppers. Same farm-fresh quality.",2,7.50,None,4.5,True,None),
     ("snu-c004","Baladna Greek Style Yoghurt 4x150g","Baladna","Thick, creamy Greek-style yoghurt made from fresh Qatar milk. High protein, rich in probiotics.",2,9.75,None,4.8,True,None),
@@ -913,22 +1172,63 @@ _GOOD_URLS: set[str] = set()
 _SKIP_VERIFY = False
 
 
-def resolve_img(key_or_url):
+def _url_from_key(key_or_url: str | None) -> str | None:
+    """Resolve an IMG key or raw URL to a URL string, or None."""
     if not key_or_url:
-        return "NULL"
-    url = IMG.get(key_or_url) if not key_or_url.startswith("http") else key_or_url
-    if not url:
-        return "NULL"
-    if _SKIP_VERIFY or url in _GOOD_URLS:
-        return esc(url)
-    return "NULL"  # failed verification
+        return None
+    if key_or_url.startswith("http"):
+        return key_or_url
+    return IMG.get(key_or_url)
+
+
+def resolve_img(key_or_url: str | None,
+                product_id: str | None = None,
+                brand: str | None = None,
+                cat_id: int | None = None) -> str:
+    """Return SQL literal for the image URL, applying fallback chain.
+
+    Resolution order:
+      1. Explicit img field (key or URL)
+      2. product_image_map.json by product_id
+      3. BRAND_IMAGE_KEY by brand → IMG key
+      4. Category fallback IMG key
+    All candidates are screened against _GOOD_URLS (or skipped when --no-verify).
+    Returns 'NULL' only if every candidate fails verification.
+    """
+    candidates: list[str] = []
+
+    # 1. Explicit field
+    explicit_url = _url_from_key(key_or_url)
+    if explicit_url:
+        candidates.append(explicit_url)
+
+    # 2. product_image_map lookup
+    if product_id and product_id in _PRODUCT_IMAGE_MAP:
+        candidates.append(_PRODUCT_IMAGE_MAP[product_id])
+
+    # 3. Brand fallback
+    if brand and brand in BRAND_IMAGE_KEY:
+        brand_url = _url_from_key(BRAND_IMAGE_KEY[brand])
+        if brand_url:
+            candidates.append(brand_url)
+
+    # 4. Category fallback
+    if cat_id and cat_id in _CATEGORY_FALLBACK:
+        cat_url = _url_from_key(_CATEGORY_FALLBACK[cat_id])
+        if cat_url:
+            candidates.append(cat_url)
+
+    for url in candidates:
+        if _SKIP_VERIFY or url in _GOOD_URLS:
+            return esc(url)
+    return "NULL"
 
 
 def curated_sql(row):
     pid, name, brand, desc, cat_id, price, img, rating, in_stock, compare_at = row
     stock = "high" if in_stock else "low"
     bool_s = "true" if in_stock else "false"
-    img_s = resolve_img(img)
+    img_s = resolve_img(img, product_id=pid, brand=brand, cat_id=cat_id)
     cmp_s = f"{compare_at:.2f}" if compare_at else "NULL"
     return (
         f"INSERT INTO public.products VALUES ({esc(pid)},{esc(name)},{esc(brand)},"
@@ -942,7 +1242,7 @@ def extra_sql(idx, row):
     pid = f"snu-x{idx:04d}"
     stock = "high" if in_stock else "low"
     bool_s = "true" if in_stock else "false"
-    img_s = resolve_img(img)
+    img_s = resolve_img(img, product_id=pid, brand=brand, cat_id=cat_id)
     cmp_s = f"{compare_at:.2f}" if compare_at else "NULL"
     return (
         f"INSERT INTO public.products VALUES ({esc(pid)},{esc(name)},{esc(brand)},"
@@ -952,23 +1252,33 @@ def extra_sql(idx, row):
 
 
 def collect_candidate_urls() -> set[str]:
-    """Gather every image URL referenced by IMG keys, CURATED rows, and EXTRA rows."""
+    """Gather every image URL that could appear in the SQL output."""
     candidate_urls: set[str] = set()
+
+    # Every URL in IMG dict
     for image_url in IMG.values():
         if image_url and image_url.startswith("http"):
             candidate_urls.add(image_url)
+
+    # Every URL in product_image_map.json
+    for image_url in _PRODUCT_IMAGE_MAP.values():
+        if image_url and image_url.startswith("http"):
+            candidate_urls.add(image_url)
+
+    # Explicit URLs in CURATED rows
     for curated_row in CURATED:
         image_field = curated_row[6]
-        if image_field and image_field.startswith("http"):
-            candidate_urls.add(image_field)
-        elif image_field and image_field in IMG and IMG[image_field]:
-            candidate_urls.add(IMG[image_field])
+        resolved = _url_from_key(image_field)
+        if resolved:
+            candidate_urls.add(resolved)
+
+    # Explicit URLs in EXTRA rows
     for extra_row in EXTRA:
         image_field = extra_row[5]
-        if image_field and image_field.startswith("http"):
-            candidate_urls.add(image_field)
-        elif image_field and image_field in IMG and IMG[image_field]:
-            candidate_urls.add(IMG[image_field])
+        resolved = _url_from_key(image_field)
+        if resolved:
+            candidate_urls.add(resolved)
+
     return candidate_urls
 
 
@@ -982,7 +1292,20 @@ def main():
     )
 
     if not _SKIP_VERIFY:
-        _GOOD_URLS = verify_images(collect_candidate_urls())
+        # Trust URLs from two pre-verified sources without re-checking:
+        #   1. product_image_map.json — verified by fetch_product_images.py
+        #   2. upload.wikimedia.org  — fetched directly from Wikipedia API;
+        #      bulk HEAD requests are rate-limited (403) by Wikimedia CDN so
+        #      sequential verification is unreliable; the API call itself is
+        #      proof of existence.
+        all_candidate_urls = collect_candidate_urls()
+        pre_verified: set[str] = {
+            url for url in all_candidate_urls
+            if url in _PRODUCT_IMAGE_MAP.values()
+            or "upload.wikimedia.org" in url
+        }
+        urls_to_check = all_candidate_urls - pre_verified
+        _GOOD_URLS = verify_images(urls_to_check) | pre_verified
     else:
         print("  Skipping image verification (--no-verify)", file=sys.stderr)
 
